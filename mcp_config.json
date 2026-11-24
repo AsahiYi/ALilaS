@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lilas": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/server/index.mjs"],
+      "env": {
+        "LILAS_PLUGIN_ROOT": "${PLUGIN_ROOT}",
+        "LILAS_DATA_DIR": "${PLUGIN_DATA}"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "lilas",
+  "displayName": "LilaS",
+  "version": "2.1.0",
+  "description": "Native Antigravity MCP App plugin that bridges DeepSeek Harness (Mode A) as a project-isolated subagent with typewriter-grade live reasoning, merged tool cards, context usage telemetry, and stall recovery.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the LilaS side pane to inspect recent reasoning chains and subagent runs",
+    "Delegate this implementation and verification task to LilaS",
+    "List LilaS Mode A subagent sessions in the current project"
+  ]
+}

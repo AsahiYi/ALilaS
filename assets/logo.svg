@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="lilas-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E1B3A"/>
+      <stop offset="55%" stop-color="#5B21B6"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="lilas-spark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#DDD6FE"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="108" height="108" rx="26" fill="url(#lilas-bg)"/>
+  <path d="M44 36 V84 H84" fill="none" stroke="url(#lilas-spark)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 34 L88.5 44.5 L99 49 L88.5 53.5 L84 64 L79.5 53.5 L69 49 L79.5 44.5 Z" fill="#FFFFFF"/>
+</svg>

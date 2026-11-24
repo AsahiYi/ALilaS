@@ -1,0 +1,22 @@
+{
+  "name": "lilas-mcp-server",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP App server bridging DeepSeek Harness (Mode A) into Antigravity",
+  "scripts": {
+    "build:ui": "node ../ui/build.mjs",
+    "start": "node ./index.mjs"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.0.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

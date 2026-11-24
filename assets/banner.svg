@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="LilaS - DeepSeek Harness Subagent Studio for Antigravity">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0C0D14"/>
+      <stop offset="55%" stop-color="#141326"/>
+      <stop offset="100%" stop-color="#1D1538"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="22%" cy="50%" r="42%">
+      <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="84%" cy="28%" r="36%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="logoBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2E1065"/>
+      <stop offset="55%" stop-color="#6D28D9"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="strokeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#A78BFA" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#C4B5FD" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0.4"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Base card -->
+  <rect x="2" y="2" width="1196" height="336" rx="22" fill="url(#bg)" stroke="url(#strokeGrad)" stroke-width="1.5"/>
+  <rect x="2" y="2" width="1196" height="336" rx="22" fill="url(#grid)"/>
+  <rect x="2" y="2" width="1196" height="336" rx="22" fill="url(#glow1)"/>
+  <rect x="2" y="2" width="1196" height="336" rx="22" fill="url(#glow2)"/>
+
+  <!-- Left geometric logo -->
+  <g transform="translate(86, 102)">
+    <rect x="0" y="0" width="136" height="136" rx="32" fill="url(#logoBg)" stroke="#C4B5FD" stroke-opacity="0.35" stroke-width="1.5"/>
+    <path d="M46 36 V92 H92" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M92 34 L97 46 L109 51 L97 56 L92 68 L87 56 L75 51 L87 46 Z" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Title & tagline -->
+  <text x="262" y="156" fill="#F8FAFC" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="62" font-weight="750" letter-spacing="1.5">LilaS</text>
+  <rect x="448" y="118" width="76" height="28" rx="14" fill="#A78BFA" fill-opacity="0.16" stroke="#A78BFA" stroke-opacity="0.45"/>
+  <text x="486" y="137" text-anchor="middle" fill="#DDD6FE" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="600">v2.1.0</text>
+
+  <text x="264" y="198" fill="#CBD5E1" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="20" font-weight="400">
+    Native DeepSeek Harness Subagent &amp; Live Reasoning Studio for Antigravity
+  </text>
+
+  <!-- Feature pills -->
+  <g transform="translate(264, 224)" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13.5" font-weight="500">
+    <rect x="0" y="0" width="164" height="32" rx="16" fill="#1E1B3A" stroke="#A78BFA" stroke-opacity="0.4"/>
+    <circle cx="18" cy="16" r="4" fill="#A78BFA"/>
+    <text x="31" y="21" fill="#E9D5FF">Typewriter Stream</text>
+
+    <rect x="178" y="0" width="156" height="32" rx="16" fill="#132325" stroke="#34D399" stroke-opacity="0.4"/>
+    <circle cx="196" cy="16" r="4" fill="#34D399"/>
+    <text x="209" y="21" fill="#A7F3D0">1M Context Meter</text>
+
+    <rect x="348" y="0" width="152" height="32" rx="16" fill="#182032" stroke="#60A5FA" stroke-opacity="0.4"/>
+    <circle cx="366" cy="16" r="4" fill="#60A5FA"/>
+    <text x="379" y="21" fill="#BFDBFE">Project Isolated</text>
+
+    <rect x="514" y="0" width="148" height="32" rx="16" fill="#281F15" stroke="#FBBF24" stroke-opacity="0.4"/>
+    <circle cx="532" cy="16" r="4" fill="#FBBF24"/>
+    <text x="545" y="21" fill="#FDE68A">Idle Watchdog</text>
+  </g>
+
+  <!-- Decorative live-stream preview mockup on right -->
+  <g transform="translate(946, 56)">
+    <rect x="0" y="0" width="204" height="228" rx="14" fill="#0F1117" fill-opacity="0.88" stroke="#2D3348" stroke-width="1.2"/>
+    <circle cx="18" cy="18" r="4" fill="#34D399"/>
+    <text x="30" y="22" fill="#E2E8F0" font-family="ui-monospace, monospace" font-size="11" font-weight="600">LilaS · S12 · 42s</text>
+    <line x1="12" y1="34" x2="192" y2="34" stroke="#222738"/>
+
+    <!-- Reasoning card -->
+    <rect x="12" y="46" width="180" height="58" rx="7" fill="#161922" stroke="#272D3B"/>
+    <rect x="12" y="46" width="3" height="58" rx="1.5" fill="#A78BFA"/>
+    <text x="24" y="63" fill="#C4B5FD" font-family="system-ui, sans-serif" font-size="10" font-weight="600">Thinking</text>
+    <rect x="24" y="72" width="142" height="6" rx="3" fill="#334155"/>
+    <rect x="24" y="84" width="112" height="6" rx="3" fill="#334155"/>
+
+    <!-- Merged tool card -->
+    <rect x="12" y="114" width="180" height="34" rx="7" fill="#12151E" stroke="#272D3B"/>
+    <rect x="12" y="114" width="3" height="34" rx="1.5" fill="#34D399"/>
+    <text x="24" y="135" fill="#94A3B8" font-family="ui-monospace, monospace" font-size="10">✓ edit  app.js   14ms</text>
+
+    <!-- Reply card -->
+    <rect x="12" y="158" width="180" height="36" rx="7" fill="#161922" stroke="#272D3B"/>
+    <rect x="12" y="158" width="3" height="36" rx="1.5" fill="#34D399"/>
+    <text x="24" y="174" fill="#34D399" font-family="system-ui, sans-serif" font-size="10" font-weight="600">LilaS</text>
+    <rect x="24" y="181" width="128" height="5" rx="2.5" fill="#475569"/>
+
+    <!-- Context bar -->
+    <rect x="12" y="206" width="126" height="5" rx="2.5" fill="#1F2430"/>
+    <rect x="12" y="206" width="54" height="5" rx="2.5" fill="#A78BFA"/>
+    <text x="146" y="212" fill="#94A3B8" font-family="ui-monospace, monospace" font-size="9.5">148K/1M</text>
+  </g>
+</svg>

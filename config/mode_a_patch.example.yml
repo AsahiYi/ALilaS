@@ -1,0 +1,46 @@
+# Copy this file to `config/mode_a_patch.yml` and adjust to match your DSH setup.
+# `config/mode_a_patch.yml` is git-ignored so your local provider URLs never leak.
+#
+# Reference: DeepSeek Harness headless profile patch overlay
+
+# 1. Enable DSH managed credentials store (disabled by default in headless profile)
+- id: credentials
+  disabled: false
+
+# 2. Recommended for long coding sessions: disable tool-result-pruner and let
+#    @deepseek-ai/dsh-compaction-basic handle context compaction cleanly (~80% window).
+- id: tool-result-pruner
+  disabled: true
+
+# 3. Default model route & reasoning effort for Mode A subagent runs
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: custom-provider
+    model: deepseek-v4.1-flash
+    reasoningEffort: high
+
+# 4. Optional custom OpenAI-compatible provider definition
+#    (Remove this block if you use the built-in `deepseek-official` provider)
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      custom-provider:
+        apiKeyEnv: YOUR_API_KEY_ENV
+        api: openai-responses
+        baseURL: https://api.example.com/v1
+        displayName: Custom Provider
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek-V4.1-Flash
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
