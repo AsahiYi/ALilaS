@@ -36,7 +36,7 @@
 
   <text x="258" y="148" fill="#F8FAFC" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="60" font-weight="750" letter-spacing="1.2">ALilaS</text>
   <rect x="468" y="110" width="76" height="28" rx="14" fill="#A78BFA" fill-opacity="0.18" stroke="#A78BFA" stroke-opacity="0.45"/>
-  <text x="506" y="129" text-anchor="middle" fill="#DDD6FE" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="600">v3.0.0</text>
+  <text x="506" y="129" text-anchor="middle" fill="#DDD6FE" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="600">v3.2.1</text>
   <rect x="554" y="110" width="134" height="28" rx="14" fill="#34D399" fill-opacity="0.14" stroke="#34D399" stroke-opacity="0.4"/>
   <text x="621" y="129" text-anchor="middle" fill="#A7F3D0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="600">better-subagent</text>
 
@@ -59,7 +59,7 @@
 
     <rect x="476" y="0" width="144" height="32" rx="16" fill="#261E14" stroke="#FBBF24" stroke-opacity="0.45"/>
     <circle cx="493" cy="16" r="4" fill="#FBBF24"/>
-    <text x="505" y="20.5" fill="#FDE68A">Idle Watchdog</text>
+    <text x="505" y="20.5" fill="#FDE68A">Auto Recovery</text>
   </g>
 
   <g transform="translate(918, 46)">
@@ -70,12 +70,12 @@
 
     <g transform="translate(14, 44)">
       <circle cx="8" cy="8" r="6" fill="none" stroke="#2D3348" stroke-width="2.2"/>
-      <circle cx="8" cy="8" r="6" fill="none" stroke="#E2E8F0" stroke-width="2.2" stroke-dasharray="22.6 37.7" transform="rotate(-90 8 8)"/>
-      <text x="19" y="12" fill="#F8FAFC" font-family="system-ui, sans-serif" font-size="11" font-weight="700">60%</text>
+      <circle cx="8" cy="8" r="6" fill="none" stroke="#E2E8F0" stroke-width="2.2" stroke-dasharray="11.8 37.7" transform="rotate(-90 8 8)"/>
+      <text x="19" y="12" fill="#F8FAFC" font-family="system-ui, sans-serif" font-size="11" font-weight="700">31%</text>
       <text x="56" y="12" fill="#A78BFA" font-family="system-ui, sans-serif" font-size="11">★</text>
-      <text x="68" y="12" fill="#CBD5E1" font-family="ui-monospace, monospace" font-size="10.5">115.6 tok/s</text>
-      <text x="158" y="12" fill="#A78BFA" font-family="system-ui, sans-serif" font-size="10.5">ılı</text>
-      <text x="172" y="12" fill="#CBD5E1" font-family="ui-monospace, monospace" font-size="10.5">117M</text>
+      <text x="68" y="12" fill="#CBD5E1" font-family="ui-monospace, monospace" font-size="10.5">113.3 tok/s</text>
+      <text x="155" y="12" fill="#A78BFA" font-family="system-ui, sans-serif" font-size="10.5">ılı</text>
+      <text x="167" y="12" fill="#CBD5E1" font-family="ui-monospace, monospace" font-size="10.5">136.9M</text>
     </g>
     <line x1="12" y1="68" x2="222" y2="68" stroke="#1E2330"/>
 
@@ -87,7 +87,7 @@
 
     <rect x="12" y="146" width="210" height="34" rx="7" fill="#12151E" stroke="#272D3B"/>
     <rect x="12" y="146" width="3" height="34" rx="1.5" fill="#34D399"/>
-    <text x="24" y="167" fill="#94A3B8" font-family="ui-monospace, monospace" font-size="10">✓ edit  server/index.mjs   14ms</text>
+    <text x="24" y="167" fill="#94A3B8" font-family="ui-monospace, monospace" font-size="10">✓ edit  server/index.mjs   13ms</text>
 
     <rect x="12" y="190" width="210" height="44" rx="7" fill="#161922" stroke="#272D3B"/>
     <rect x="12" y="190" width="3" height="44" rx="1.5" fill="#34D399"/>
