@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "lilas", version: "2.1.0" }, {});
+const app = new App({ name: "alilas", version: "3.0.0" }, {});
 
 const state = {
   selectedSessionId: null,
@@ -17,16 +17,25 @@ const state = {
   includeHidden: false,
   sessions: [],
   recentCwds: [],
+  drivers: [],
+  customProfiles: [],
+  defaultSelection: { driver: "", model: "", effort: "high", profileId: "" },
+  telemetry: { allTimeTokens: 0, allTimeOutputTokens: 0, totalRuns: 0, lastTps: 0 },
+  selectedModelKey: "", // format: "profile:<id>" or "<driver>::<model>"
+  userTouchedModel: false,
+  permissionMode: "auto", // "auto" | "readonly"
   activeRun: null,
   activeRuns: [],
   session: null,
   expandAllReasoning: false,
   showTools: true,
   showManageBar: false,
+  showCustomModal: false,
   openDetails: new Set(),
   closedDetails: new Set(),
   lastEtag: "",
   lastSessionsSig: "",
+  lastModelsSig: "",
   lastRenderedSessionId: null,
   renderedCardSigs: new Map(),
   pollTimer: null,
@@ -35,7 +44,6 @@ const state = {
   canUpdateContext: false,
   canOpenLinks: false,
   errorMsg: "",
-  toastMsg: "",
   toastTimer: null,
 };
 
@@ -62,7 +70,8 @@ function formatDuration(ms) {
 
 function formatTokens(n) {
   if (!n) return "0";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
   return String(n);
 }
@@ -75,6 +84,11 @@ function shortProjectName(cwd, slug) {
   return (slug || "").replace(/^--|--$/g, "").split("-").pop() || "";
 }
 
+function shortDriverTag(driver) {
+  const map = { agy: "AGY", dsh: "DSH", claude: "Claude", codex: "Codex" };
+  return map[driver] || driver || "AGY";
+}
+
 function isRunningStatus(run) {
   return Boolean(run && (run.status === "running" || run.status === "starting"));
 }
@@ -84,15 +98,12 @@ function anyActiveRun() {
 }
 
 function showToast(msg) {
-  state.toastMsg = msg;
   const el = $("toast");
   if (!el) return;
   el.textContent = msg;
   el.classList.add("show");
   if (state.toastTimer) clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => {
-    el.classList.remove("show");
-  }, 1800);
+  state.toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
 }
 
 async function copyText(text, label = "已复制") {
@@ -102,7 +113,7 @@ async function copyText(text, label = "已复制") {
       showToast(label);
       return;
     } catch {
-      // Sandboxed iframe may deny Clipboard API; fall through to execCommand
+      // Sandboxed iframe fallback
     }
   }
   try {
@@ -142,9 +153,7 @@ async function openFileInHost(filePath) {
       },
       z.object({ isError: z.boolean().optional() }).passthrough(),
     );
-    if (res?.isError) {
-      showToast("当前视图不支持侧栏打开文件");
-    }
+    if (res?.isError) showToast("当前视图不支持侧栏打开文件");
   } catch {
     showToast("无法打开文件预览");
   }
@@ -154,12 +163,7 @@ async function attachContextToHost(title, body) {
   if (!state.canUpdateContext) return;
   try {
     await app.updateModelContext({
-      content: [
-        {
-          type: "text",
-          text: `[LilaS 引用 · ${title}]\n${body.slice(0, 6000)}`,
-        },
-      ],
+      content: [{ type: "text", text: `[ALilaS 引用 · ${title}]\n${body.slice(0, 6000)}` }],
     });
     showToast("已附加到下条对话上下文");
   } catch {
@@ -167,7 +171,23 @@ async function attachContextToHost(title, body) {
   }
 }
 
-// ---------------------------------------------------------------- Header & Bars
+function parseModelKey(key) {
+  if (!key) return { driver: undefined, model: undefined, profileId: undefined };
+  if (key.startsWith("profile:")) {
+    const pid = key.slice(8);
+    const p = state.customProfiles.find((x) => x.id === pid);
+    return { driver: p?.driver, model: p?.model, profileId: pid };
+  }
+  const sep = key.indexOf("::");
+  if (sep === -1) return { driver: undefined, model: undefined, profileId: undefined };
+  return {
+    driver: key.slice(0, sep),
+    model: key.slice(sep + 2) || undefined,
+    profileId: "",
+  };
+}
+
+// ---------------------------------------------------------------- Header & Telemetry Bar
 
 function renderStatus() {
   const run = state.activeRun;
@@ -198,9 +218,7 @@ function renderStatus() {
   } else if (run?.status === "error" || run?.status === "timeout") {
     dot.className = "dot error";
     label.textContent =
-      run.status === "timeout"
-        ? `超时 (${run.elapsedSec}s)`
-        : `异常 (${run.elapsedSec}s)`;
+      run.status === "timeout" ? `超时 (${run.elapsedSec}s)` : `异常 (${run.elapsedSec}s)`;
     stopBtn.style.display = "none";
   } else if (run?.status === "stopped") {
     dot.className = "dot idle";
@@ -227,6 +245,7 @@ function renderSessionSelect() {
   const sig = JSON.stringify(
     state.sessions.map((s) => [
       s.sessionId,
+      s.driver,
       s.isRunning,
       s.pinned,
       s.alias,
@@ -241,11 +260,12 @@ function renderSessionSelect() {
     const opts = state.sessions
       .map((s) => {
         const prefix = s.isRunning ? "● " : s.pinned ? "★ " : s.isHeadless ? "" : "[桌面] ";
+        const drv = shortDriverTag(s.driver);
         const proj = shortProjectName(s.cwd, s.workspaceSlug);
-        const name = (s.alias || s.title || s.sessionId).slice(0, 32);
-        return `<option value="${escapeHtml(s.sessionId)}">${prefix}${
-          proj ? `[${escapeHtml(proj)}] ` : ""
-        }${escapeHtml(name)} (${s.reasoningCount})</option>`;
+        const name = (s.alias || s.title || s.sessionId).slice(0, 28);
+        return `<option value="${escapeHtml(s.sessionId)}">${prefix}[${drv}${
+          proj ? "/" + escapeHtml(proj) : ""
+        }] ${escapeHtml(name)} (${s.reasoningCount})</option>`;
       })
       .join("");
     sel.innerHTML = opts || '<option value="">暂无会话</option>';
@@ -258,7 +278,6 @@ function renderSessionSelect() {
 function renderAgentChips() {
   const bar = $("agents-bar");
   const running = state.activeRuns.filter(isRunningStatus);
-  // Keep UI clean: show switchable chips only when >=2 parallel agents run in current scope (or if running agent differs from selected)
   const hasOtherRunning = running.some(
     (r) => r.sessionId && r.sessionId !== state.selectedSessionId,
   );
@@ -272,11 +291,11 @@ function renderAgentChips() {
     .map((r, idx) => {
       const isSel = r.sessionId && r.sessionId === state.selectedSessionId;
       const proj = shortProjectName(r.cwd, "") || `分身${idx + 1}`;
-      const label = state.allProjects ? proj : `分身${idx + 1}`;
+      const label = state.allProjects ? `${shortDriverTag(r.driver)}·${proj}` : `${shortDriverTag(r.driver)} #${idx + 1}`;
       const dotCls = r.stalled ? "chip-dot stalled" : "chip-dot";
       return `<button type="button" class="agent-chip ${isSel ? "active" : ""}" data-sid="${escapeHtml(
         r.sessionId || "",
-      )}" title="${escapeHtml(r.taskPreview || "")}"><span class="${dotCls}"></span><span>${escapeHtml(
+      )}" title="${escapeHtml(`${r.driver}/${r.model || "default"} · ${r.taskPreview || ""}`)}"><span class="${dotCls}"></span><span>${escapeHtml(
         label,
       )}</span><span class="chip-meta">S${r.step || 1} · ${
         r.stalled ? `静默${r.idleSec}s` : `${r.elapsedSec}s`
@@ -285,45 +304,88 @@ function renderAgentChips() {
     .join("");
 }
 
+/**
+ * Image-2 inspired compact telemetry bar:
+ * Left: project + driver/counts
+ * Right: [SVG Ring 60%]  [★ 115.6 tok/s]  [ılı 117.0M]
+ */
 function renderStats() {
   const s = state.session;
   const bar = $("stats-bar");
-  if (!s) {
-    bar.innerHTML = `<span class="stat-item muted">LilaS 就绪</span>`;
-    return;
-  }
-  const st = s.stats || {};
-  const proj = shortProjectName(s.cwd, "");
-  const usage = state.activeRun?.usage || s.usage || null;
+  const run = state.activeRun;
 
-  const items = [];
-  if (!s.isHeadless) {
-    items.push(`<span class="stat-tag readonly">桌面只读</span>`);
-  }
-  if (proj) {
-    items.push(`<span class="stat-item" title="${escapeHtml(s.cwd || "")}">${escapeHtml(proj)}</span>`);
-  }
-  items.push(`<span class="stat-item">思考 <b>${st.reasoningCount ?? 0}</b></span>`);
-  items.push(`<span class="stat-item">工具 <b>${st.toolCallCount ?? 0}</b></span>`);
-  items.push(`<span class="stat-item">回复 <b>${st.textCount ?? 0}</b></span>`);
-
-  if (usage?.totalTokens) {
-    const pct = Math.min(100, (usage.totalTokens / 1_000_000) * 100);
-    const cacheDenom = (usage.inputTokens || 0) + (usage.cacheReadTokens || 0);
-    const cachePct =
-      cacheDenom > 0 ? Math.round(((usage.cacheReadTokens || 0) / cacheDenom) * 100) : null;
-    const tone = pct >= 85 ? "danger" : pct >= 70 ? "warn" : "";
-    const tip = `上下文 ${formatTokens(usage.totalTokens)} / 1M (${pct.toFixed(1)}%)${
-      cachePct !== null ? ` · 缓存命中 ${cachePct}%` : ""
-    }`;
-    items.push(`
-      <span class="ctx-meter ${tone}" title="${escapeHtml(tip)}">
-        <span class="ctx-track"><span class="ctx-fill" style="width:${pct.toFixed(1)}%"></span></span>
-        <span class="ctx-text">${formatTokens(usage.totalTokens)}/1M</span>
-      </span>`);
+  const leftParts = [];
+  if (s) {
+    const st = s.stats || {};
+    const proj = shortProjectName(s.cwd, "");
+    const drv = shortDriverTag(run?.driver || s.driver);
+    leftParts.push(`<span class="stat-driver">${escapeHtml(drv)}</span>`);
+    if (proj) {
+      leftParts.push(`<span class="stat-item" title="${escapeHtml(s.cwd || "")}">${escapeHtml(proj)}</span>`);
+    }
+    leftParts.push(`<span class="stat-item">思<b>${st.reasoningCount ?? 0}</b></span>`);
+    leftParts.push(`<span class="stat-item">工<b>${st.toolCallCount ?? 0}</b></span>`);
+    leftParts.push(`<span class="stat-item">回<b>${st.textCount ?? 0}</b></span>`);
+  } else {
+    leftParts.push(`<span class="stat-item muted">ALilaS 就绪</span>`);
   }
 
-  bar.innerHTML = items.join('<span class="stat-sep">·</span>');
+  // Telemetry cluster (ring % · ★ tok/s · ılı total tokens)
+  const usage = run?.usage || s?.usage || null;
+  const cw = run?.contextWindow || s?.contextWindow || 1_000_000;
+  const used = usage?.totalTokens || 0;
+  const pct = used > 0 ? Math.min(100, (used / cw) * 100) : 0;
+  const pctLabel = pct >= 10 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`;
+  const ringTone = pct >= 85 ? "danger" : pct >= 70 ? "warn" : "";
+  const circumference = 37.7; // 2 * PI * 6
+  const dash = ((pct / 100) * circumference).toFixed(2);
+
+  const cacheDenom = (usage?.inputTokens || 0) + (usage?.cacheReadTokens || 0);
+  const cachePct =
+    cacheDenom > 0 ? Math.round(((usage.cacheReadTokens || 0) / cacheDenom) * 100) : null;
+  const ringTip = used
+    ? `上下文窗口 ${formatTokens(used)} / ${formatTokens(cw)} (${pct.toFixed(1)}%)${
+        cachePct !== null ? ` · 缓存命中 ${cachePct}%` : ""
+      }`
+    : `上下文窗口 0 / ${formatTokens(cw)}`;
+
+  const tps = run?.tps || s?.lastTps || state.telemetry?.lastTps || 0;
+  const tpsLabel = tps > 0 ? `${tps.toFixed(1)} tok/s` : "-- tok/s";
+
+  const totalBurned =
+    state.telemetry?.allTimeTokens ||
+    run?.cumulativeTokens ||
+    s?.cumulativeTokens ||
+    used ||
+    0;
+  const totalTip = `累计 Tokens: ${formatTokens(totalBurned)}（本会话: ${formatTokens(
+    s?.cumulativeTokens || used,
+  )} · 历史总运行: ${state.telemetry?.totalRuns || 0} 次）`;
+
+  const telemetryHtml = `
+    <div class="telemetry">
+      <span class="tel-item tel-ring ${ringTone}" title="${escapeHtml(ringTip)}">
+        <svg class="ring-svg" viewBox="0 0 16 16" width="14" height="14">
+          <circle class="ring-track" cx="8" cy="8" r="6" />
+          <circle class="ring-fill" cx="8" cy="8" r="6" stroke-dasharray="${dash} ${circumference}" transform="rotate(-90 8 8)" />
+        </svg>
+        <span class="tel-pct">${used ? pctLabel : "0%"}</span>
+      </span>
+      <span class="tel-item" title="实时 / 最近一步输出速度">
+        <span class="tel-star">★</span>
+        <span class="tel-val">${tpsLabel}</span>
+      </span>
+      <span class="tel-item" title="${escapeHtml(totalTip)}">
+        <svg class="bars-svg" viewBox="0 0 14 14" width="12" height="12">
+          <rect x="1" y="7" width="2.4" height="6" rx="1" />
+          <rect x="5.8" y="2" width="2.4" height="11" rx="1" />
+          <rect x="10.6" y="4.5" width="2.4" height="8.5" rx="1" />
+        </svg>
+        <span class="tel-val">${formatTokens(totalBurned)}</span>
+      </span>
+    </div>`;
+
+  bar.innerHTML = `<div class="stats-left">${leftParts.join('<span class="stat-sep">·</span>')}</div>${telemetryHtml}`;
 }
 
 function renderManageBar() {
@@ -349,7 +411,100 @@ function renderManageBar() {
   hideBtn.textContent = cur?.hidden ? "取消隐藏" : "隐藏";
 }
 
-// ---------------------------------------------------------------- Timeline (Incremental DOM)
+function renderModelSelect() {
+  const sel = $("model-select");
+  const sig = JSON.stringify({
+    d: state.drivers.map((d) => [d.id, d.installed, (d.models || []).map((m) => m.id)]),
+    c: state.customProfiles.map((p) => [p.id, p.name, p.driver, p.model]),
+    def: state.defaultSelection,
+  });
+
+  if (sig !== state.lastModelsSig) {
+    state.lastModelsSig = sig;
+    const groups = [];
+
+    // Custom upstream profiles first if any
+    if (state.customProfiles.length > 0) {
+      const opts = state.customProfiles
+        .map((p) => {
+          const isDef = state.defaultSelection.profileId === p.id;
+          return `<option value="profile:${escapeHtml(p.id)}">${isDef ? "★ " : ""}${escapeHtml(
+            p.name,
+          )} [${shortDriverTag(p.driver)}]</option>`;
+        })
+        .join("");
+      groups.push(`<optgroup label="自定义上游预设">${opts}</optgroup>`);
+    }
+
+    for (const d of state.drivers) {
+      const statusLabel = d.installed ? "" : "（未安装）";
+      const models = d.models || [];
+      if (models.length === 0) {
+        groups.push(
+          `<optgroup label="${escapeHtml(d.label + statusLabel)}"><option value="${escapeHtml(
+            d.id,
+          )}::" ${d.installed ? "" : "disabled"}>${escapeHtml(d.label)} 默认${statusLabel}</option></optgroup>`,
+        );
+      } else {
+        const opts = models
+          .map((m) => {
+            const isDef =
+              !state.defaultSelection.profileId &&
+              state.defaultSelection.driver === d.id &&
+              state.defaultSelection.model === m.id;
+            return `<option value="${escapeHtml(d.id)}::${escapeHtml(m.id)}" ${
+              d.installed ? "" : "disabled"
+            }>${isDef ? "★ " : ""}${escapeHtml(m.name || m.id)}</option>`;
+          })
+          .join("");
+        groups.push(`<optgroup label="${escapeHtml(d.label + statusLabel)}">${opts}</optgroup>`);
+      }
+    }
+
+    sel.innerHTML = groups.join("") || '<option value="">自动选择引擎</option>';
+
+    // Pick initial selection if user hasn't manually changed it
+    if (!state.userTouchedModel) {
+      let desired = "";
+      if (state.defaultSelection.profileId) {
+        desired = `profile:${state.defaultSelection.profileId}`;
+      } else if (state.defaultSelection.driver && state.defaultSelection.model) {
+        desired = `${state.defaultSelection.driver}::${state.defaultSelection.model}`;
+      } else if (state.session?.driver && state.session?.model) {
+        desired = `${state.session.driver}::${state.session.model}`;
+      }
+      if (desired && Array.from(sel.options).some((o) => o.value === desired && !o.disabled)) {
+        sel.value = desired;
+        state.selectedModelKey = desired;
+      } else {
+        const firstEnabled = Array.from(sel.options).find((o) => !o.disabled);
+        if (firstEnabled) {
+          sel.value = firstEnabled.value;
+          state.selectedModelKey = firstEnabled.value;
+        }
+      }
+    }
+  }
+
+  // Render custom profiles list inside drawer
+  const listEl = $("custom-profiles-list");
+  if (listEl) {
+    listEl.innerHTML = state.customProfiles.length
+      ? state.customProfiles
+          .map(
+            (p) =>
+              `<div class="profile-row"><span><b>${escapeHtml(p.name)}</b> <span class="muted">[${shortDriverTag(
+                p.driver,
+              )}/${escapeHtml(p.model)}]</span></span><button type="button" class="icon-btn" data-del-profile="${escapeHtml(
+                p.id,
+              )}">删除</button></div>`,
+          )
+          .join("")
+      : `<div class="muted" style="font-size:11px;">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>`;
+  }
+}
+
+// ---------------------------------------------------------------- Timeline
 
 function buildCardHtml(item, key, isLastReasoning) {
   const ctxBtn = state.canUpdateContext
@@ -361,7 +516,7 @@ function buildCardHtml(item, key, isLastReasoning) {
     return `
       <div class="card card-user" data-card-key="${escapeHtml(key)}">
         <div class="card-head">
-          <span class="tag tag-user">${isNeon ? "Neon" : "指令"}</span>
+          <span class="tag tag-user">${isNeon ? "Coordinator" : "指令"}</span>
           <span class="meta">T${item.turn || 1}</span>
         </div>
         <div class="card-body pre-wrap">${escapeHtml(item.text)}</div>
@@ -385,7 +540,7 @@ function buildCardHtml(item, key, isLastReasoning) {
           <span class="summary-preview">${escapeHtml(preview)}</span>
           <span class="card-actions">
             <span class="meta">S${item.step || 0} · ${item.charCount || item.text.length}字</span>
-            <button type="button" class="icon-btn" data-copy-key="${escapeHtml(key)}" title="复制">复制</button>
+            <button type="button" class="icon-btn" data-copy-key="${escapeHtml(key)}">复制</button>
             ${ctxBtn}
           </span>
         </summary>
@@ -451,10 +606,10 @@ function buildCardHtml(item, key, isLastReasoning) {
     return `
       <div class="card card-text" data-card-key="${escapeHtml(key)}">
         <div class="card-head">
-          <span class="tag tag-text">LilaS</span>
+          <span class="tag tag-text">ALilaS</span>
           <span class="card-actions">
             <span class="meta">T${item.turn || 1} · S${item.step || 0}</span>
-            <button type="button" class="icon-btn" data-copy-key="${escapeHtml(key)}" title="复制 Markdown">复制</button>
+            <button type="button" class="icon-btn" data-copy-key="${escapeHtml(key)}">复制</button>
             ${ctxBtn}
           </span>
         </div>
@@ -502,7 +657,7 @@ function buildLiveFooterHtml(run) {
       return `
         <div class="card card-live" id="live-stream-card">
           <div class="card-head">
-            <span class="tag tag-live"><span class="spinner-sm"></span> 实时流</span>
+            <span class="tag tag-live"><span class="spinner-sm"></span> 实时流 · ${shortDriverTag(run.driver)}</span>
             <span class="meta">S${run.step || 1} · ${run.elapsedSec}s</span>
           </div>
           <div class="card-body">${blocks.join("")}</div>
@@ -511,7 +666,7 @@ function buildLiveFooterHtml(run) {
     return `
       <div class="running-footer" id="live-stream-card">
         <span class="spinner"></span>
-        <span>LilaS 处理中（S${run.step || 1} · ${run.elapsedSec}s）…</span>
+        <span>ALilaS 处理中（${shortDriverTag(run.driver)} · S${run.step || 1} · ${run.elapsedSec}s）…</span>
       </div>`;
   }
   if (run?.error) {
@@ -524,7 +679,6 @@ function buildLiveFooterHtml(run) {
   return "";
 }
 
-// Lookup map for copy/attach buttons
 const itemLookup = new Map();
 
 function renderTimeline(forceFull = false) {
@@ -541,8 +695,8 @@ function renderTimeline(forceFull = false) {
     itemLookup.clear();
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-mark">LilaS</div>
-        <div class="empty-desc">等待任务派发，或在下方直接输入指令开始新会话。</div>
+        <div class="empty-mark">ALilaS</div>
+        <div class="empty-desc">多引擎增强子代理就绪。选择下方模型直接发指令，或等待主代理派活。</div>
       </div>`;
     return;
   }
@@ -554,7 +708,6 @@ function renderTimeline(forceFull = false) {
     container.innerHTML = "";
   }
 
-  // Ensure notice banner if truncated
   let noticeEl = container.querySelector(":scope > .notice-banner");
   if (s.stats?.truncatedItems) {
     const noticeText = `仅展示最近 ${s.items.length} / ${s.stats.totalTimelineItems} 条`;
@@ -566,9 +719,9 @@ function renderTimeline(forceFull = false) {
     if (noticeEl.textContent !== noticeText) noticeEl.textContent = noticeText;
   } else if (noticeEl) {
     noticeEl.remove();
+    noticeEl = null;
   }
 
-  // Filter visible items and find latest reasoning index
   const visible = s.items.filter((it) => state.showTools || it.kind !== "tool");
   let lastReasoningIdx = -1;
   for (let i = visible.length - 1; i >= 0; i--) {
@@ -581,11 +734,9 @@ function renderTimeline(forceFull = false) {
   itemLookup.clear();
   const activeKeys = new Set();
 
-  // Remove live card temporarily while reconciling cards
   const existingLive = $("live-stream-card");
   if (existingLive) existingLive.remove();
 
-  // Map existing DOM cards
   const existingNodes = new Map();
   container.querySelectorAll(":scope > [data-card-key]").forEach((el) => {
     existingNodes.set(el.getAttribute("data-card-key"), el);
@@ -614,17 +765,15 @@ function renderTimeline(forceFull = false) {
     const existingEl = existingNodes.get(key);
 
     if (existingEl && prevSig === itemSig) {
-      // Ensure chronological position even if an earlier sibling was re-inserted
-      const expectedPrev = prevAnchor;
-      const inPlace = expectedPrev
-        ? expectedPrev.nextElementSibling === existingEl
+      const inPlace = prevAnchor
+        ? prevAnchor.nextElementSibling === existingEl
         : container.firstElementChild === existingEl;
       if (!inPlace) {
-        if (expectedPrev) expectedPrev.after(existingEl);
+        if (prevAnchor) prevAnchor.after(existingEl);
         else container.prepend(existingEl);
       }
       prevAnchor = existingEl;
-      return; // untouched content! preserves text selection & scroll
+      return;
     }
 
     const html = buildCardHtml(item, key, isLastR);
@@ -651,7 +800,6 @@ function renderTimeline(forceFull = false) {
     state.renderedCardSigs.set(key, itemSig);
   });
 
-  // Prune stale cards (e.g. when showTools toggled off or window slid)
   for (const [k, el] of existingNodes.entries()) {
     if (!activeKeys.has(k)) {
       el.remove();
@@ -659,7 +807,6 @@ function renderTimeline(forceFull = false) {
     }
   }
 
-  // Append live streaming / running footer
   const liveHtml = buildLiveFooterHtml(run);
   if (liveHtml) {
     const tpl = document.createElement("template");
@@ -685,8 +832,11 @@ function renderComposerState() {
   const cwdRow = $("cwd-row");
   const cwdInput = $("cwd-input");
   const cwdHint = $("cwd-hint");
+  const permBtn = $("btn-perm-mode");
 
-  // Populate datalist with recentCwds
+  permBtn.textContent = state.permissionMode === "readonly" ? "只读" : "自动";
+  permBtn.classList.toggle("active", state.permissionMode === "readonly");
+
   const dl = $("cwd-datalist");
   const dlSig = state.recentCwds.join("|");
   if (dl.dataset.sig !== dlSig) {
@@ -701,6 +851,8 @@ function renderComposerState() {
 
   const willCreateNew = newChk.checked || !state.selectedSessionId || isDesktop;
   cwdRow.style.display = newChk.checked || !state.selectedSessionId ? "flex" : "none";
+  $("custom-drawer").style.display = state.showCustomModal ? "flex" : "none";
+  $("btn-add-profile").classList.toggle("active", state.showCustomModal);
 
   if (isDesktop && !newChk.checked) {
     input.placeholder = "当前为桌面端只读会话；勾选「新会话」可直接派活…";
@@ -708,7 +860,7 @@ function renderComposerState() {
     cwdHint.textContent = "";
   } else {
     input.placeholder = willCreateNew
-      ? "输入新任务给 LilaS… (Ctrl+Enter)"
+      ? "输入新任务给 ALilaS… (Ctrl+Enter)"
       : "继续当前会话… (Ctrl+Enter)";
     sendBtn.disabled = false;
     cwdHint.textContent =
@@ -725,6 +877,7 @@ function renderAll(forceFullTimeline = false) {
   renderAgentChips();
   renderStats();
   renderManageBar();
+  renderModelSelect();
   renderComposerState();
 
   const errBar = $("error-banner");
@@ -745,7 +898,7 @@ async function pollState(force = false) {
   state.polling = true;
   try {
     const res = await app.callServerTool({
-      name: "lilas_poll_state",
+      name: "alilas_poll_state",
       arguments: {
         session_id: state.selectedSessionId || undefined,
         scope_cwd: state.allProjects ? undefined : state.scopeCwd || undefined,
@@ -763,11 +916,12 @@ async function pollState(force = false) {
       state.lastEtag = snap.etag || "";
       state.activeRun = snap.activeRun || null;
       state.activeRuns = snap.activeRuns || [];
+      if (snap.telemetry) state.telemetry = snap.telemetry;
 
       if (snap.unchanged) {
-        // Still update elapsed timers and chips smoothly
         renderStatus();
         renderAgentChips();
+        renderStats();
         if (isRunningStatus(state.activeRun)) {
           const liveCard = $("live-stream-card");
           if (liveCard) {
@@ -782,6 +936,9 @@ async function pollState(force = false) {
       } else {
         state.sessions = snap.sessions || [];
         state.recentCwds = snap.recentCwds || state.recentCwds;
+        state.drivers = snap.drivers || state.drivers;
+        state.customProfiles = snap.customProfiles || state.customProfiles;
+        if (snap.defaultSelection) state.defaultSelection = snap.defaultSelection;
         state.selectedSessionId = snap.selectedSessionId || null;
         state.session = snap.session || null;
         renderAll(force);
@@ -807,7 +964,6 @@ function scheduleNextPoll() {
 // ---------------------------------------------------------------- Events
 
 function bindEvents() {
-  // Delegated click & toggle handlers inside timeline (no per-render listener churn)
   const timeline = $("timeline");
 
   timeline.addEventListener(
@@ -866,13 +1022,10 @@ function bindEvents() {
     if (extLink) {
       e.preventDefault();
       const url = extLink.getAttribute("data-ext-url");
-      if (url && state.canOpenLinks) {
-        app.openLink({ url }).catch(() => {});
-      }
+      if (url && state.canOpenLinks) app.openLink({ url }).catch(() => {});
     }
   });
 
-  // Agent chips switching
   $("agents-bar").addEventListener("click", (e) => {
     const chip = e.target.closest("[data-sid]");
     if (!chip) return;
@@ -934,11 +1087,8 @@ function bindEvents() {
     const cur = state.sessions.find((s) => s.sessionId === state.selectedSessionId);
     if (!cur) return;
     await app.callServerTool({
-      name: "lilas_ui_manage_session",
-      arguments: {
-        session_id: cur.sessionId,
-        action: cur.pinned ? "unpin" : "pin",
-      },
+      name: "alilas_ui_manage_session",
+      arguments: { session_id: cur.sessionId, action: cur.pinned ? "unpin" : "pin" },
     });
     state.lastEtag = "";
     showToast(cur.pinned ? "已取消置顶" : "已置顶");
@@ -955,12 +1105,8 @@ function bindEvents() {
     const val = $("rename-input").value.trim();
     closeRenameRow();
     await app.callServerTool({
-      name: "lilas_ui_manage_session",
-      arguments: {
-        session_id: cur.sessionId,
-        action: "rename",
-        alias: val,
-      },
+      name: "alilas_ui_manage_session",
+      arguments: { session_id: cur.sessionId, action: "rename", alias: val },
     });
     state.lastEtag = "";
     showToast("已更新名称");
@@ -985,24 +1131,16 @@ function bindEvents() {
   $("btn-rename-save").addEventListener("click", submitRename);
   $("btn-rename-cancel").addEventListener("click", closeRenameRow);
   $("rename-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      submitRename();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      closeRenameRow();
-    }
+    if (e.key === "Enter") { e.preventDefault(); submitRename(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeRenameRow(); }
   });
 
   $("btn-hide-session").addEventListener("click", async () => {
     const cur = state.sessions.find((s) => s.sessionId === state.selectedSessionId);
     if (!cur) return;
     await app.callServerTool({
-      name: "lilas_ui_manage_session",
-      arguments: {
-        session_id: cur.sessionId,
-        action: cur.hidden ? "unhide" : "hide",
-      },
+      name: "alilas_ui_manage_session",
+      arguments: { session_id: cur.sessionId, action: cur.hidden ? "unhide" : "hide" },
     });
     if (!cur.hidden) state.selectedSessionId = null;
     state.lastEtag = "";
@@ -1035,7 +1173,7 @@ function bindEvents() {
     if (!state.activeRun?.runId) return;
     try {
       await app.callServerTool({
-        name: "lilas_ui_stop_task",
+        name: "alilas_ui_stop_task",
         arguments: { run_id: state.activeRun.runId },
       });
       state.lastEtag = "";
@@ -1045,6 +1183,90 @@ function bindEvents() {
       state.errorMsg = `停止失败: ${e?.message || e}`;
       renderAll(false);
     }
+  });
+
+  // Model selector & custom upstream profile drawer
+  $("model-select").addEventListener("change", (e) => {
+    state.selectedModelKey = e.target.value;
+    state.userTouchedModel = true;
+  });
+
+  $("btn-set-default-model").addEventListener("click", async () => {
+    const parsed = parseModelKey($("model-select").value);
+    if (!parsed.driver && !parsed.profileId) return;
+    await app.callServerTool({
+      name: "alilas_ui_manage_profiles",
+      arguments: {
+        action: "set_default",
+        driver: parsed.driver || "",
+        model: parsed.model || "",
+        profile_id: parsed.profileId || "",
+      },
+    });
+    state.lastModelsSig = "";
+    state.lastEtag = "";
+    showToast("已设为默认子代理模型");
+    pollState(true);
+  });
+
+  $("btn-add-profile").addEventListener("click", () => {
+    state.showCustomModal = !state.showCustomModal;
+    renderComposerState();
+  });
+
+  $("btn-save-profile").addEventListener("click", async () => {
+    const name = $("pf-name").value.trim();
+    const driver = $("pf-driver").value;
+    const model = $("pf-model").value.trim();
+    const baseURL = $("pf-baseurl").value.trim();
+    const apiKeyEnv = $("pf-keyenv").value.trim();
+    const cw = Number($("pf-cw").value) || 200000;
+    if (!model) {
+      showToast("请填写模型 ID");
+      return;
+    }
+    await app.callServerTool({
+      name: "alilas_ui_manage_profiles",
+      arguments: {
+        action: "upsert_profile",
+        profile: {
+          name: name || model,
+          driver,
+          provider: (name || "custom").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "custom",
+          model,
+          baseURL,
+          apiKeyEnv,
+          contextWindow: cw,
+        },
+      },
+    });
+    $("pf-name").value = "";
+    $("pf-model").value = "";
+    $("pf-baseurl").value = "";
+    $("pf-keyenv").value = "";
+    state.lastModelsSig = "";
+    state.lastEtag = "";
+    showToast("已保存上游预设");
+    pollState(true);
+  });
+
+  $("custom-profiles-list").addEventListener("click", async (e) => {
+    const delBtn = e.target.closest("[data-del-profile]");
+    if (!delBtn) return;
+    await app.callServerTool({
+      name: "alilas_ui_manage_profiles",
+      arguments: { action: "delete_profile", profile_id: delBtn.getAttribute("data-del-profile") },
+    });
+    state.lastModelsSig = "";
+    state.lastEtag = "";
+    showToast("已删除预设");
+    pollState(true);
+  });
+
+  $("btn-perm-mode").addEventListener("click", () => {
+    state.permissionMode = state.permissionMode === "auto" ? "readonly" : "auto";
+    renderComposerState();
+    showToast(state.permissionMode === "readonly" ? "已切为只读审计模式" : "已切为自动执行模式");
   });
 
   $("chk-new-session").addEventListener("change", () => {
@@ -1059,16 +1281,27 @@ function bindEvents() {
     const task = input.value.trim();
     if (!task) return;
     const forceNew = $("chk-new-session").checked;
+    const chosen = parseModelKey($("model-select").value);
+    const switchingDriver =
+      state.session?.driver && chosen.driver && state.session.driver !== chosen.driver;
     const sid =
-      forceNew || !state.session?.isHeadless
+      forceNew || switchingDriver || !state.session?.isHeadless
         ? undefined
         : state.selectedSessionId || undefined;
-    const cwd = sid ? undefined : $("cwd-input").value.trim() || undefined;
+    const cwd = sid ? undefined : $("cwd-input").value.trim() || state.session?.cwd || undefined;
     input.value = "";
     try {
       const res = await app.callServerTool({
-        name: "lilas_ui_send_task",
-        arguments: { task, session_id: sid, cwd },
+        name: "alilas_ui_send_task",
+        arguments: {
+          task,
+          session_id: sid,
+          cwd,
+          driver: chosen.driver,
+          model: chosen.model,
+          profile_id: chosen.profileId || undefined,
+          permission_mode: state.permissionMode,
+        },
       });
       if (res?.isError || res?.structuredContent?.error) {
         state.errorMsg = res?.structuredContent?.error || res?.content?.[0]?.text || "启动失败";
@@ -1076,12 +1309,8 @@ function bindEvents() {
         return;
       }
       const run = res?.structuredContent?.run;
-      if (run?.sessionId) {
-        state.selectedSessionId = run.sessionId;
-      }
-      if (!sid && run?.cwd && !state.allProjects) {
-        state.scopeCwd = run.cwd;
-      }
+      if (run?.sessionId) state.selectedSessionId = run.sessionId;
+      if (!sid && run?.cwd && !state.allProjects) state.scopeCwd = run.cwd;
       state.activeRun = run || state.activeRun;
       $("chk-new-session").checked = false;
       state.lastEtag = "";
@@ -1103,12 +1332,11 @@ function bindEvents() {
   $("btn-send-neon").addEventListener("click", async () => {
     if (!state.canMessageHost || !state.session) return;
     const reply = state.session.lastAssistantText || "(无回复文本)";
-    const msg = `请审阅 LilaS 会话 ${state.session.sessionId} 的最新输出：\n\n${reply.slice(0, 1800)}`;
+    const msg = `请审阅 ALilaS 会话 ${state.session.sessionId} [${shortDriverTag(
+      state.session.driver,
+    )}/${state.session.model || "default"}] 的最新输出：\n\n${reply.slice(0, 1800)}`;
     try {
-      await app.sendMessage({
-        role: "user",
-        content: [{ type: "text", text: msg }],
-      });
+      await app.sendMessage({ role: "user", content: [{ type: "text", text: msg }] });
       showToast("已发回对话");
     } catch (e) {
       state.errorMsg = `发送失败: ${e?.message || e}`;
@@ -1135,9 +1363,7 @@ app.ontoolinput = ({ arguments: args }) => {
     state.scopeCwd = args.cwd;
     state.allProjects = false;
   }
-  if (typeof args?.all_projects === "boolean") {
-    state.allProjects = args.all_projects;
-  }
+  if (typeof args?.all_projects === "boolean") state.allProjects = args.all_projects;
   if (typeof args?.headless_only === "boolean") {
     state.headlessOnly = args.headless_only;
     $("chk-include-desktop").checked = !state.headlessOnly;
@@ -1146,25 +1372,15 @@ app.ontoolinput = ({ arguments: args }) => {
 
 app.ontoolresult = (result) => {
   const sc = result?.structuredContent;
-  if (sc?.selectedSessionId) {
-    state.selectedSessionId = sc.selectedSessionId;
-  }
-  if (typeof sc?.scopeCwd === "string") {
-    state.scopeCwd = sc.scopeCwd;
-  }
-  if (typeof sc?.allProjects === "boolean") {
-    state.allProjects = sc.allProjects;
-  }
-  if (sc?.activeRun) {
-    state.activeRun = sc.activeRun;
-  }
+  if (sc?.selectedSessionId) state.selectedSessionId = sc.selectedSessionId;
+  if (typeof sc?.scopeCwd === "string") state.scopeCwd = sc.scopeCwd;
+  if (typeof sc?.allProjects === "boolean") state.allProjects = sc.allProjects;
+  if (sc?.activeRun) state.activeRun = sc.activeRun;
   state.lastEtag = "";
   pollState(true);
 };
 
-app.onhostcontextchanged = (ctx) => {
-  applyTheme(ctx);
-};
+app.onhostcontextchanged = (ctx) => applyTheme(ctx);
 
 async function init() {
   bindEvents();

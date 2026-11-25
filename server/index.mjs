@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -18,47 +18,29 @@ import {
   cwdToWorkspaceSlug,
   findSessionFileById,
   inspectSessionForResume,
-  listSessions,
-  parseSessionFile,
+  listSessions as listDshSessions,
+  parseSessionFile as parseDshSessionFile,
 } from "./dsh_reader.mjs";
+import { detectAllDrivers, getDriver } from "./drivers/index.mjs";
+import { inferContextWindow } from "./drivers/utils.mjs";
+import { createProfileStore } from "./profiles.mjs";
+import { createTimelineStore } from "./timeline_store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN_ROOT =
-  process.env.LILAS_PLUGIN_ROOT || path.resolve(__dirname, "..");
-const DATA_DIR =
-  process.env.LILAS_DATA_DIR || path.join(PLUGIN_ROOT, "data");
+const PLUGIN_ROOT = process.env.ALILAS_PLUGIN_ROOT || process.env.LILAS_PLUGIN_ROOT || path.resolve(__dirname, "..");
+const DATA_DIR = process.env.ALILAS_DATA_DIR || process.env.LILAS_DATA_DIR || path.join(PLUGIN_ROOT, "data");
 const REGISTRY_FILE = path.join(DATA_DIR, "plugin_sessions.json");
-const STREAM_PATCH_FILE = path.join(DATA_DIR, "stream_probe_patch.yml");
-const STREAM_PROBE_PATH = path.join(__dirname, "stream_probe.mjs");
-const SEED_SESSIONS = [];
-
-const APP_URI = "ui://lilas/app.html";
+const APP_URI = "ui://alilas/app.html";
 const APP_HTML_PATH =
-  process.env.LILAS_APP_HTML || path.join(PLUGIN_ROOT, "ui", "dist", "app.html");
-const DEFAULT_PATCH_FILE = path.join(PLUGIN_ROOT, "config", "mode_a_patch.yml");
-const PATCH_FILE =
-  process.env.LILAS_PATCH_FILE ||
-  (fs.existsSync(DEFAULT_PATCH_FILE) ? DEFAULT_PATCH_FILE : "");
+  process.env.ALILAS_APP_HTML || path.join(PLUGIN_ROOT, "ui", "dist", "app.html");
 const DEFAULT_CWD =
-  process.env.LILAS_DEFAULT_CWD || process.cwd() || os.homedir();
-const STREAM_PREFIX = "__LILAS_STREAM__";
-
-function resolveDshSpawnSpec() {
-  const configured = (process.env.LILAS_DSH_BIN || "").trim();
-  if (configured) {
-    if (/\.(?:c|m)?js$/i.test(configured)) {
-      return { cmd: process.execPath, prefixArgs: [configured] };
-    }
-    return { cmd: configured, prefixArgs: [] };
-  }
-  return {
-    cmd: process.platform === "win32" ? "dsh.cmd" : "dsh",
-    prefixArgs: [],
-  };
-}
+  process.env.ALILAS_DEFAULT_CWD || process.cwd() || os.homedir();
 
 const REFUSAL_PATTERN =
   /(?:Sorry,\s*I\s*can(?:'|’)?t\s*(?:respond|assist|help)\s*to\s*this|I(?:'|’)?m\s*sorry,?\s*(?:but\s*)?I\s*can(?:'|’)?t\s*(?:assist|help|respond))/i;
+
+const timelineStore = createTimelineStore(DATA_DIR);
+const profileStore = createProfileStore(DATA_DIR);
 
 function normalizeCwd(p) {
   if (!p || typeof p !== "string") return "";
@@ -69,25 +51,52 @@ function normalizeCwd(p) {
   }
 }
 
-// ---------------------------------------------------------------- Registry v2
+function summarizeArgs(rawArgs) {
+  if (rawArgs === undefined || rawArgs === null) return "";
+  if (typeof rawArgs === "string") return rawArgs.replace(/\s+/g, " ").slice(0, 92);
+  if (typeof rawArgs === "object") {
+    for (const k of ["command", "cmd", "path", "file_path", "filePath", "target_file", "pattern", "query", "url"]) {
+      if (typeof rawArgs[k] === "string" && rawArgs[k].trim()) {
+        const s = rawArgs[k].replace(/\s+/g, " ").trim();
+        return s.length > 92 ? s.slice(0, 92) + "…" : s;
+      }
+    }
+    try {
+      const s = JSON.stringify(rawArgs);
+      return s.length > 92 ? s.slice(0, 92) + "…" : s;
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function extractFilePaths(rawArgs, sessionCwd) {
+  if (!rawArgs || typeof rawArgs !== "object") return [];
+  const out = [];
+  for (const k of ["path", "file_path", "filePath", "target_file", "file", "filename"]) {
+    const val = rawArgs[k];
+    if (typeof val === "string" && val.trim() && !val.includes("\n")) {
+      const resolved = path.isAbsolute(val.trim())
+        ? val.trim()
+        : sessionCwd
+          ? path.resolve(sessionCwd, val.trim())
+          : "";
+      if (resolved && !out.includes(resolved)) out.push(resolved);
+    }
+  }
+  return out.slice(0, 3);
+}
+
+// ---------------------------------------------------------------- Registry v3
 
 let registryVersion = 1;
 
 function createEmptyRegistry() {
-  const sessions = {};
-  for (const sid of SEED_SESSIONS) {
-    sessions[sid] = {
-      alias: "",
-      pinned: false,
-      hidden: false,
-      cwd: DEFAULT_CWD,
-      createdAt: Date.now(),
-    };
-  }
   return {
-    version: 2,
+    version: 3,
     recentCwds: [DEFAULT_CWD],
-    sessions,
+    sessions: {},
   };
 }
 
@@ -98,10 +107,13 @@ function loadRegistry() {
       const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf8"));
       if (Array.isArray(raw)) {
         const reg = createEmptyRegistry();
-        reg.sessions = {};
         for (const sid of raw) {
           if (typeof sid === "string" && sid.trim()) {
             reg.sessions[sid] = {
+              driver: "dsh",
+              model: "",
+              effort: "",
+              profileId: "",
               alias: "",
               pinned: false,
               hidden: false,
@@ -114,15 +126,21 @@ function loadRegistry() {
         return reg;
       }
       if (raw && typeof raw === "object" && raw.sessions && typeof raw.sessions === "object") {
+        // Normalize v2 -> v3 seamlessly (default driver: "dsh" for legacy session-* entries)
+        for (const [sid, meta] of Object.entries(raw.sessions)) {
+          if (!meta.driver) {
+            meta.driver = sid.startsWith("session-") ? "dsh" : "agy";
+          }
+        }
         return {
-          version: 2,
+          version: 3,
           recentCwds: Array.isArray(raw.recentCwds) ? raw.recentCwds.filter(Boolean) : [DEFAULT_CWD],
           sessions: raw.sessions,
         };
       }
     }
   } catch {
-    // fallback to seeded
+    // ignore
   }
   const seeded = createEmptyRegistry();
   saveRegistry(seeded);
@@ -164,11 +182,15 @@ function recordRecentCwd(cwd) {
   registry.recentCwds = list.slice(0, 12);
 }
 
-function recordPluginSession(sessionId, { cwd } = {}) {
+function recordPluginSession(sessionId, { driver, model, effort, profileId, cwd } = {}) {
   if (!sessionId) return;
   let changed = false;
   if (!registry.sessions[sessionId]) {
     registry.sessions[sessionId] = {
+      driver: driver || "agy",
+      model: model || "",
+      effort: effort || "",
+      profileId: profileId || "",
       alias: "",
       pinned: false,
       hidden: false,
@@ -176,9 +198,13 @@ function recordPluginSession(sessionId, { cwd } = {}) {
       createdAt: Date.now(),
     };
     changed = true;
-  } else if (cwd && !registry.sessions[sessionId].cwd) {
-    registry.sessions[sessionId].cwd = cwd;
-    changed = true;
+  } else {
+    const m = registry.sessions[sessionId];
+    if (driver && !m.driver) { m.driver = driver; changed = true; }
+    if (model && m.model !== model) { m.model = model; changed = true; }
+    if (effort && m.effort !== effort) { m.effort = effort; changed = true; }
+    if (profileId !== undefined && m.profileId !== profileId) { m.profileId = profileId; changed = true; }
+    if (cwd && !m.cwd) { m.cwd = cwd; changed = true; }
   }
   if (cwd) {
     const before = registry.recentCwds[0];
@@ -186,21 +212,6 @@ function recordPluginSession(sessionId, { cwd } = {}) {
     if (registry.recentCwds[0] !== before) changed = true;
   }
   if (changed) saveRegistry(registry);
-}
-
-function ensureStreamProbePatch() {
-  try {
-    if (!fs.existsSync(STREAM_PROBE_PATH)) return null;
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const probeUrl = pathToFileURL(STREAM_PROBE_PATH).href;
-    const content = `- insert:\n    - id: lilas-stream-probe\n      name: ${JSON.stringify(probeUrl)}\n`;
-    if (!fs.existsSync(STREAM_PATCH_FILE) || fs.readFileSync(STREAM_PATCH_FILE, "utf8") !== content) {
-      fs.writeFileSync(STREAM_PATCH_FILE, content, "utf8");
-    }
-    return STREAM_PATCH_FILE;
-  } catch {
-    return null;
-  }
 }
 
 function killProcessTree(child) {
@@ -213,15 +224,11 @@ function killProcessTree(child) {
         windowsHide: true,
       });
       killer.on("error", () => {
-        try {
-          child.kill();
-        } catch {
-          // ignore
-        }
+        try { child.kill(); } catch {}
       });
       return;
     } catch {
-      // fallback below
+      // fallback
     }
   }
   try {
@@ -231,14 +238,91 @@ function killProcessTree(child) {
   }
 }
 
+// ---------------------------------------------------------------- Driver Catalog Cache
+
+let driversCache = null;
+let driversCacheAt = 0;
+
+function getDetectedDrivers(force = false) {
+  const now = Date.now();
+  if (!force && driversCache && now - driversCacheAt < 60_000) {
+    return driversCache;
+  }
+  driversCache = detectAllDrivers({ pluginRoot: PLUGIN_ROOT });
+  driversCacheAt = now;
+  return driversCache;
+}
+
+function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId }) {
+  const sessMeta = sessionId ? registry.sessions[sessionId] : null;
+  const profSnap = profileStore.getSnapshot();
+  const def = profSnap.defaultSelection;
+
+  const chosenProfileId = profileId || (!driver && !model ? sessMeta?.profileId || def.profileId : "");
+  const profile = chosenProfileId ? profileStore.findProfile(chosenProfileId) : null;
+
+  let effectiveDriver =
+    driver ||
+    profile?.driver ||
+    sessMeta?.driver ||
+    def.driver ||
+    "";
+
+  const detected = getDetectedDrivers(false);
+  if (!effectiveDriver || effectiveDriver === "auto") {
+    // Prefer dsh if configured with mode_a_patch.yml, else agy, else first installed
+    const dshInfo = detected.find((d) => d.id === "dsh" && d.installed && d.models?.length > 0);
+    const agyInfo = detected.find((d) => d.id === "agy" && d.installed);
+    const anyInstalled = detected.find((d) => d.installed);
+    effectiveDriver = dshInfo?.id || agyInfo?.id || anyInstalled?.id || "agy";
+  }
+
+  let effectiveModel =
+    model ||
+    profile?.model ||
+    (sessMeta?.driver === effectiveDriver ? sessMeta.model : "") ||
+    (def.driver === effectiveDriver ? def.model : "") ||
+    "";
+
+  if (!effectiveModel) {
+    const dInfo = detected.find((d) => d.id === effectiveDriver);
+    if (dInfo?.models?.length > 0) {
+      effectiveModel = dInfo.models[0].id;
+    }
+  }
+
+  const effectiveEffort =
+    effort ||
+    profile?.effort ||
+    (sessMeta?.driver === effectiveDriver ? sessMeta.effort : "") ||
+    def.effort ||
+    "high";
+
+  const dInfo = detected.find((d) => d.id === effectiveDriver);
+  const foundModel = dInfo?.models?.find((m) => m.id === effectiveModel);
+  const contextWindow =
+    profile?.contextWindow ||
+    foundModel?.contextWindow ||
+    inferContextWindow(effectiveModel, effectiveDriver === "dsh" || effectiveDriver === "agy" ? 1_000_000 : 200_000);
+
+  return {
+    driver: effectiveDriver,
+    model: effectiveModel,
+    effort: effectiveEffort,
+    profileId: profile?.id || "",
+    profile,
+    contextWindow,
+  };
+}
+
 // ---------------------------------------------------------------- MCP Metadata
 
 const PANE_META = {
   ui: { resourceUri: APP_URI },
   "com.google.antigravity/ui": {
     entrypoints: [
-      { type: "aux_pane", title: "LilaS" },
-      { type: "global", title: "LilaS" },
+      { type: "aux_pane", title: "ALilaS" },
+      { type: "global", title: "ALilaS" },
     ],
   },
 };
@@ -254,7 +338,6 @@ const APP_ONLY_META = {
 // ---------------------------------------------------------------- Run Manager
 
 const runs = new Map();
-let latestRunId = null;
 
 function isRunActive(run) {
   return Boolean(run && (run.status === "starting" || run.status === "running"));
@@ -266,11 +349,20 @@ function touchRunActivity(run) {
   if (run.stalled) {
     run.stalled = false;
     if (run.phase === "stalled") run.phase = "running";
-    // Recreate stallPromise for future stall detection
     run.stallPromise = new Promise((res) => {
       run.resolveStall = res;
     });
   }
+}
+
+function computeLiveTps(run) {
+  if (!run) return 0;
+  if (run.live.active && run.live.firstDeltaAt && run.live.deltaChars > 12) {
+    const elapsedSec = Math.max(0.25, (Date.now() - run.live.firstDeltaAt) / 1000);
+    // Practical approximation (~3.1 chars/token for mixed CJK/code) during live stream
+    return Math.round(((run.live.deltaChars / 3.1) / elapsedSec) * 10) / 10;
+  }
+  return run.tps || 0;
 }
 
 function serializeRun(run) {
@@ -281,9 +373,14 @@ function serializeRun(run) {
   return {
     runId: run.runId,
     sessionId: run.sessionId,
+    driver: run.driver,
+    model: run.model,
+    effort: run.effort,
+    permissionMode: run.permissionMode,
+    contextWindow: run.contextWindow,
     taskPreview: run.task.slice(0, 180),
     cwd: run.cwd,
-    status: run.status, // starting | running | done | error | timeout | stopped
+    status: run.status,
     phase: run.phase,
     turn: run.turn,
     step: run.step,
@@ -297,7 +394,9 @@ function serializeRun(run) {
     error: run.error,
     finalText: run.finalText ? run.finalText.slice(0, 4000) : "",
     stderrTail: run.stderrTail,
-    usage: run.live.usage || run.lastStepUsage || null,
+    usage: run.latestUsage || null,
+    tps: computeLiveTps(run),
+    cumulativeTokens: run.cumulativeTokens || 0,
     live: run.live.active
       ? {
           active: true,
@@ -314,9 +413,7 @@ function serializeRun(run) {
 function getActiveSessionIds() {
   const s = new Set();
   for (const r of runs.values()) {
-    if (r.sessionId && isRunActive(r)) {
-      s.add(r.sessionId);
-    }
+    if (r.sessionId && isRunActive(r)) s.add(r.sessionId);
   }
   return s;
 }
@@ -337,9 +434,11 @@ function resolveCwdForSessionId(sessionId) {
   if (activeRun?.cwd) return activeRun.cwd;
   const regCwd = registry.sessions[sessionId]?.cwd;
   if (regCwd) return regCwd;
+  const tl = timelineStore.load(sessionId);
+  if (tl?.cwd) return tl.cwd;
   const fp = findSessionFileById(sessionId);
   if (fp) {
-    const parsed = parseSessionFile(fp, { maxItems: 1 });
+    const parsed = parseDshSessionFile(fp, { maxItems: 1 });
     if (parsed?.cwd) return parsed.cwd;
   }
   return "";
@@ -364,79 +463,87 @@ function stopRunById(runId, reason = "stopped_by_user") {
   return run;
 }
 
-function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
+function launchSubagentRun({
+  task,
+  sessionId,
+  cwd,
+  driver,
+  model,
+  effort,
+  profileId,
+  permissionMode = "auto",
+  timeoutSec,
+  idleTimeoutSec,
+}) {
+  const sel = resolveEffectiveSelection({ driver, model, effort, profileId, sessionId });
+  const driverMod = getDriver(sel.driver);
+  if (!driverMod) {
+    throw new Error(`不支持的子代理驱动: ${sel.driver}（可选: agy | dsh | claude | codex）`);
+  }
+
   let workDir = (cwd || "").trim() || DEFAULT_CWD;
 
   if (sessionId) {
     const existing = findRunForSession(sessionId);
     if (existing && isRunActive(existing)) {
       throw new Error(
-        `会话 ${sessionId} 正在运行中（${existing.runId}），禁止对同一会话并发派活。如需中止旧任务请先调 lilas_stop_task("${existing.runId}")，如需多开并行请留空 session_id。`,
+        `会话 ${sessionId} 正在运行中（${existing.runId}），禁止并发派活。如需中止旧任务请先调 alilas_stop_task("${existing.runId}")，如需并行请留空 session_id。`,
       );
     }
-    const check = inspectSessionForResume(sessionId);
-    if (!check.adoptable) {
-      throw new Error(check.reason);
+    if (sel.driver === "dsh") {
+      const check = inspectSessionForResume(sessionId);
+      if (!check.adoptable) throw new Error(check.reason);
+      workDir = check.cwd;
+    } else {
+      const savedCwd = resolveCwdForSessionId(sessionId);
+      if (savedCwd) workDir = savedCwd;
     }
-    workDir = check.cwd;
-  } else {
-    if (!fs.existsSync(workDir)) {
-      throw new Error(`工作目录不存在: ${workDir}`);
-    }
+  } else if (!fs.existsSync(workDir)) {
+    throw new Error(`工作目录不存在: ${workDir}`);
   }
 
   const runId = `run-${crypto.randomBytes(4).toString("hex")}`;
-  // Default: no hard wall-clock limit (0 = unlimited) so active long-running tasks are never killed mid-work.
-  // Only set a hard wall-clock timer if caller explicitly requests timeoutSec > 0.
   const timeoutMs =
     typeof timeoutSec === "number" && timeoutSec > 0
       ? Math.max(30, Math.min(timeoutSec, 86400)) * 1000
       : 0;
   const clampedIdleSec = Math.max(60, Math.min(idleTimeoutSec || 180, 600));
 
-  const dshSpec = resolveDshSpawnSpec();
-  const args = [
-    ...dshSpec.prefixArgs,
-    "--profile",
-    "headless",
-  ];
-  if (PATCH_FILE && fs.existsSync(PATCH_FILE)) {
-    args.push("--patch", PATCH_FILE);
-  }
-  const probePatch = ensureStreamProbePatch();
-  if (probePatch) {
-    args.push("--patch", probePatch);
-  }
-  args.push("--json");
-  if (sessionId) {
-    args.push("--session-id", sessionId);
-  }
-  args.push("-");
+  const inv = driverMod.buildInvocation({
+    runId,
+    task,
+    sessionId,
+    cwd: workDir,
+    model: sel.model,
+    effort: sel.effort,
+    permissionMode,
+    profile: sel.profile,
+    dataDir: DATA_DIR,
+    pluginRoot: PLUGIN_ROOT,
+  });
 
   let resolveSession;
-  const sessionReady = new Promise((res) => {
-    resolveSession = res;
-  });
-
+  const sessionReady = new Promise((res) => { resolveSession = res; });
   let resolveDone;
-  const donePromise = new Promise((res) => {
-    resolveDone = res;
-  });
-
+  const donePromise = new Promise((res) => { resolveDone = res; });
   let resolveStall;
-  const stallPromise = new Promise((res) => {
-    resolveStall = res;
-  });
+  const stallPromise = new Promise((res) => { resolveStall = res; });
 
   const now = Date.now();
   const run = {
     runId,
     sessionId: sessionId || null,
+    driver: sel.driver,
+    model: sel.model,
+    effort: sel.effort,
+    profileId: sel.profileId,
+    permissionMode,
+    contextWindow: sel.contextWindow,
     task,
     cwd: workDir,
     status: "starting",
     phase: "booting",
-    turn: 0,
+    turn: 1,
     step: 0,
     startedAt: now,
     lastActivityAt: now,
@@ -449,7 +556,10 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
     error: null,
     finalText: "",
     stderrTail: "",
-    lastStepUsage: null,
+    latestUsage: null,
+    tps: 0,
+    cumulativeTokens: 0,
+    cleanupPaths: inv.cleanupPaths || [],
     live: {
       active: false,
       seq: 0,
@@ -457,8 +567,11 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
       reasoning: "",
       text: "",
       toolName: "",
-      usage: null,
+      firstDeltaAt: 0,
+      deltaChars: 0,
     },
+    timelineDoc: null,
+    toolMap: new Map(),
     child: null,
     timer: null,
     watchdog: null,
@@ -469,17 +582,52 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
     resolveStall,
   };
 
+  function ensureTimelineDoc() {
+    if (!run.sessionId) return null;
+    if (!run.timelineDoc) {
+      run.timelineDoc = timelineStore.ensure({
+        sessionId: run.sessionId,
+        driver: run.driver,
+        model: run.model,
+        effort: run.effort,
+        cwd: run.cwd,
+        contextWindow: run.contextWindow,
+        title: run.task.replace(/\s+/g, " ").slice(0, 48),
+      });
+      run.timelineDoc.turns = (run.timelineDoc.turns || 0) + 1;
+      run.turn = run.timelineDoc.turns;
+      run.timelineDoc.items.push({
+        kind: "user",
+        seq: `u.${Date.now()}`,
+        turn: run.turn,
+        step: 0,
+        time: run.startedAt,
+        text: run.task.slice(0, 4000),
+        charCount: run.task.length,
+      });
+      timelineStore.save(run.timelineDoc);
+    }
+    return run.timelineDoc;
+  }
+
   if (sessionId) {
-    recordPluginSession(sessionId, { cwd: workDir });
+    recordPluginSession(sessionId, {
+      driver: sel.driver,
+      model: sel.model,
+      effort: sel.effort,
+      profileId: sel.profileId,
+      cwd: workDir,
+    });
+    if (sel.driver !== "dsh") ensureTimelineDoc();
   } else {
     recordRecentCwd(workDir);
     saveRegistry(registry);
   }
 
   runs.set(runId, run);
-  latestRunId = runId;
+  profileStore.recordUsageDelta({ driver: sel.driver, incrementRun: true });
 
-  if (runs.size > 30) {
+  if (runs.size > 35) {
     for (const [k, v] of runs.entries()) {
       if (!isRunActive(v)) {
         runs.delete(k);
@@ -488,78 +636,304 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
     }
   }
 
-  const child = spawn(dshSpec.cmd, args, {
-    cwd: workDir,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+  const handleEvent = (ev) => {
+    touchRunActivity(run);
+
+    if (ev.type === "session" && ev.sessionId) {
+      const firstBind = !run.sessionId;
+      run.sessionId = ev.sessionId;
+      if (ev.model && !run.model) run.model = ev.model;
+      recordPluginSession(ev.sessionId, {
+        driver: run.driver,
+        model: run.model,
+        effort: run.effort,
+        profileId: run.profileId,
+        cwd: run.cwd,
+      });
+      if (run.driver !== "dsh") ensureTimelineDoc();
+      if (run.status === "starting") {
+        run.status = "running";
+        run.phase = "session_ready";
+      }
+      if (firstBind) resolveSession(ev.sessionId);
+      return;
+    }
+
+    if (ev.type === "status") {
+      if (run.status === "starting") run.status = "running";
+      if (ev.phase) run.phase = ev.phase;
+      if (typeof ev.turn === "number") run.turn = ev.turn;
+      if (typeof ev.step === "number") run.step = ev.step;
+      if (ev.phase === "turn_end") {
+        run.live.active = false;
+        run.live.reasoning = "";
+        run.live.text = "";
+        run.live.toolName = "";
+        run.live.firstDeltaAt = 0;
+        run.live.deltaChars = 0;
+        run.live.seq++;
+      }
+      return;
+    }
+
+    if (ev.type === "stream_start") {
+      run.live.active = true;
+      run.live.step = ev.step || run.step || 1;
+      run.live.reasoning = "";
+      run.live.text = "";
+      run.live.toolName = "";
+      run.live.firstDeltaAt = 0;
+      run.live.deltaChars = 0;
+      run.live.seq++;
+      return;
+    }
+
+    if (ev.type === "reasoning_delta" && ev.text) {
+      run.live.active = true;
+      if (!run.live.firstDeltaAt) run.live.firstDeltaAt = Date.now();
+      run.live.deltaChars += ev.text.length;
+      if (ev.step) run.live.step = ev.step;
+      run.phase = "thinking";
+      run.live.reasoning = (run.live.reasoning + ev.text).slice(-16000);
+      run.live.seq++;
+      return;
+    }
+
+    if (ev.type === "text_delta" && ev.text) {
+      run.live.active = true;
+      if (!run.live.firstDeltaAt) run.live.firstDeltaAt = Date.now();
+      run.live.deltaChars += ev.text.length;
+      if (ev.step) run.live.step = ev.step;
+      run.phase = "writing";
+      run.live.text = (run.live.text + ev.text).slice(-16000);
+      run.live.seq++;
+      return;
+    }
+
+    if (ev.type === "tool_delta" && ev.toolName) {
+      run.live.active = true;
+      run.live.toolName = ev.toolName;
+      run.phase = `tool:${ev.toolName}`;
+      run.live.seq++;
+      return;
+    }
+
+    if (ev.type === "reasoning_commit" && ev.text) {
+      run.live.seq++;
+      if (run.driver !== "dsh") {
+        const doc = ensureTimelineDoc();
+        if (doc) {
+          doc.reasoningCount++;
+          doc.steps = Math.max(doc.steps, ev.step || run.step || 1);
+          doc.items.push({
+            kind: "reasoning",
+            seq: `r.${doc.items.length}`,
+            turn: run.turn,
+            step: ev.step || run.step || 1,
+            time: Date.now(),
+            text: ev.text.slice(0, 12000),
+            charCount: ev.text.length,
+          });
+          timelineStore.save(doc);
+        }
+        run.live.reasoning = "";
+      }
+      return;
+    }
+
+    if (ev.type === "text_commit" && ev.text) {
+      run.live.seq++;
+      if (run.driver !== "dsh") {
+        const doc = ensureTimelineDoc();
+        if (doc) {
+          doc.textCount++;
+          doc.steps = Math.max(doc.steps, ev.step || run.step || 1);
+          doc.lastAssistantText = ev.text.slice(0, 32000);
+          doc.items.push({
+            kind: "text",
+            seq: `t.${doc.items.length}`,
+            turn: run.turn,
+            step: ev.step || run.step || 1,
+            time: Date.now(),
+            text: ev.text.slice(0, 16000),
+            charCount: ev.text.length,
+          });
+          timelineStore.save(doc);
+        }
+        run.live.text = "";
+      }
+      return;
+    }
+
+    if (ev.type === "tool_start") {
+      run.toolCallsInRun++;
+      run.phase = `tool:${ev.toolName || "exec"}`;
+      run.live.toolName = ev.toolName || "";
+      run.live.seq++;
+      if (run.driver !== "dsh") {
+        const doc = ensureTimelineDoc();
+        if (doc) {
+          doc.toolCallCount++;
+          const argsPreview =
+            typeof ev.args === "string"
+              ? ev.args.slice(0, 900)
+              : JSON.stringify(ev.args ?? {}, null, 2).slice(0, 900);
+          const item = {
+            kind: "tool",
+            seq: `tc.${doc.items.length}`,
+            callId: ev.callId,
+            turn: run.turn,
+            step: ev.step || run.step || 1,
+            toolName: ev.toolName || "tool",
+            argsSummary: summarizeArgs(ev.args),
+            argsPreview,
+            filePaths: extractFilePaths(ev.args, run.cwd),
+            status: "running",
+            isError: false,
+            startTime: ev.time || Date.now(),
+            endTime: null,
+            durationMs: null,
+            resultText: "",
+          };
+          run.toolMap.set(ev.callId, item);
+          doc.items.push(item);
+          timelineStore.save(doc);
+        }
+      }
+      return;
+    }
+
+    if (ev.type === "tool_end") {
+      run.live.toolName = "";
+      run.live.seq++;
+      if (run.driver !== "dsh") {
+        const doc = ensureTimelineDoc();
+        if (doc) {
+          const item = run.toolMap.get(ev.callId);
+          if (item) {
+            item.status = ev.isError ? "error" : "done";
+            item.isError = Boolean(ev.isError);
+            item.resultText = String(ev.resultText || "").slice(0, 2400);
+            item.endTime = ev.time || Date.now();
+            item.durationMs = ev.durationMs;
+          } else {
+            doc.items.push({
+              kind: "tool",
+              seq: `tr.${doc.items.length}`,
+              callId: ev.callId || `tr.${Date.now()}`,
+              turn: run.turn,
+              step: ev.step || run.step || 1,
+              toolName: ev.toolName || "tool",
+              argsSummary: "",
+              argsPreview: "",
+              filePaths: [],
+              status: ev.isError ? "error" : "done",
+              isError: Boolean(ev.isError),
+              startTime: null,
+              endTime: ev.time || Date.now(),
+              durationMs: ev.durationMs,
+              resultText: String(ev.resultText || "").slice(0, 2400),
+            });
+          }
+          timelineStore.save(doc);
+        }
+      }
+      return;
+    }
+
+    if (ev.type === "usage" && ev.usage) {
+      run.latestUsage = ev.usage;
+      const genTokens = (ev.usage.outputTokens || 0) + (ev.usage.thinkingTokens || 0);
+      const stepTotal = ev.usage.totalTokens || 0;
+      if (ev.durationSec && ev.durationSec > 0.1 && genTokens > 0) {
+        run.tps = Math.round((genTokens / ev.durationSec) * 10) / 10;
+      } else if (run.live.firstDeltaAt && genTokens > 0) {
+        const dt = Math.max(0.2, (Date.now() - run.live.firstDeltaAt) / 1000);
+        run.tps = Math.round((genTokens / dt) * 10) / 10;
+      }
+      if (stepTotal > 0) {
+        run.cumulativeTokens += stepTotal;
+        profileStore.recordUsageDelta({
+          driver: run.driver,
+          totalTokens: stepTotal,
+          outputTokens: genTokens,
+          tps: run.tps,
+        });
+      }
+      if (run.timelineDoc) {
+        run.timelineDoc.usage = ev.usage;
+        if (run.tps) run.timelineDoc.lastTps = run.tps;
+        run.timelineDoc.cumulativeTokens = (run.timelineDoc.cumulativeTokens || 0) + stepTotal;
+        timelineStore.save(run.timelineDoc);
+      }
+      run.live.seq++;
+      return;
+    }
+
+    if (ev.type === "final" && ev.text) {
+      run.finalText = ev.text;
+      if (run.timelineDoc) {
+        run.timelineDoc.lastAssistantText = ev.text.slice(0, 32000);
+        timelineStore.save(run.timelineDoc);
+      }
+      return;
+    }
+
+    if (ev.type === "error" && ev.message) {
+      run.error = ev.message;
+      if (run.timelineDoc) {
+        run.timelineDoc.items.push({
+          kind: "error",
+          seq: `e.${run.timelineDoc.items.length}`,
+          turn: run.turn,
+          step: run.step,
+          time: Date.now(),
+          text: String(ev.message).slice(0, 1500),
+        });
+        timelineStore.save(run.timelineDoc);
+      }
+      return;
+    }
+
+    if (ev.type === "stderr" && ev.text) {
+      run.stderrTail = (run.stderrTail + ev.text + "\n").slice(-2000);
+    }
+  };
+
+  const parser = driverMod.createParser(handleEvent);
+
+  const child = spawn(inv.cmd, inv.args, {
+    cwd: inv.cwd,
+    env: inv.env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    shell: process.platform === "win32" && /\.cmd$/i.test(dshSpec.cmd),
+    shell: Boolean(inv.shell),
   });
   run.child = child;
 
-  try {
-    child.stdin.write(task, "utf8");
-    child.stdin.end();
-  } catch (e) {
-    run.error = `stdin 写入失败: ${e.message}`;
+  if (typeof inv.stdinText === "string") {
+    try {
+      child.stdin.write(inv.stdinText, "utf8");
+      child.stdin.end();
+    } catch (e) {
+      run.error = `stdin 写入失败: ${e.message}`;
+    }
+  } else {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
   }
 
   let stdoutBuf = "";
   child.stdout.on("data", (chunk) => {
-    touchRunActivity(run);
     stdoutBuf += chunk.toString("utf8");
     let idx;
     while ((idx = stdoutBuf.indexOf("\n")) !== -1) {
       const line = stdoutBuf.slice(0, idx).trim();
       stdoutBuf = stdoutBuf.slice(idx + 1);
-      if (!line) continue;
-      try {
-        const ev = JSON.parse(line);
-        if (ev.type === "session" && ev.sessionId) {
-          run.sessionId = ev.sessionId;
-          recordPluginSession(ev.sessionId, { cwd: workDir });
-          run.status = "running";
-          run.phase = "session_ready";
-          resolveSession(ev.sessionId);
-        } else if (ev.type === "status") {
-          run.status = "running";
-          if (ev.phase) run.phase = ev.phase;
-          if (typeof ev.turn === "number") run.turn = ev.turn;
-          if (typeof ev.step === "number") run.step = ev.step;
-          if (ev.usage && typeof ev.usage === "object") {
-            run.lastStepUsage = ev.usage;
-          }
-          if (ev.phase === "turn_end") {
-            run.live.active = false;
-            run.live.reasoning = "";
-            run.live.text = "";
-            run.live.toolName = "";
-            run.live.seq++;
-          }
-          if (ev.reason?.kind === "error") {
-            const msg = ev.reason?.error?.message || JSON.stringify(ev.reason);
-            run.error = msg;
-          }
-        } else if (ev.type === "thinking" || ev.type === "text") {
-          run.live.seq++;
-        } else if (ev.type === "tool_call") {
-          run.toolCallsInRun++;
-          run.phase = `tool:${ev.tool || "exec"}`;
-          run.live.toolName = ev.tool || "";
-          run.live.seq++;
-        } else if (ev.type === "tool_result") {
-          run.live.toolName = "";
-          run.live.seq++;
-        } else if (ev.type === "final") {
-          if (typeof ev.text === "string" && ev.text.trim()) {
-            run.finalText = ev.text.trim();
-          }
-        } else if (ev.type === "error") {
-          run.error = ev.message || JSON.stringify(ev);
-        }
-      } catch {
-        // ignore non-json stdout line
-      }
+      if (line) parser.onStdoutLine(line);
     }
   });
 
@@ -570,61 +944,17 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
     while ((idx = stderrBuf.indexOf("\n")) !== -1) {
       const rawLine = stderrBuf.slice(0, idx);
       stderrBuf = stderrBuf.slice(idx + 1);
-      if (rawLine.startsWith(STREAM_PREFIX)) {
-        try {
-          const ev = JSON.parse(rawLine.slice(STREAM_PREFIX.length));
-          if (ev.sessionId && run.sessionId && ev.sessionId !== run.sessionId) {
-            continue;
-          }
-          touchRunActivity(run);
-          if (ev.type === "stream_start") {
-            run.live.active = true;
-            run.live.step = run.step || 1;
-            run.live.reasoning = "";
-            run.live.text = "";
-            run.live.toolName = "";
-            run.live.seq++;
-          } else if (ev.type === "stream_end") {
-            run.live.seq++;
-          } else if (ev.type === "reasoning_delta" && ev.text) {
-            run.live.active = true;
-            if (!run.live.step) run.live.step = run.step || 1;
-            run.phase = "thinking";
-            run.live.reasoning = (run.live.reasoning + ev.text).slice(-16000);
-            run.live.seq++;
-          } else if (ev.type === "text_delta" && ev.text) {
-            run.live.active = true;
-            if (!run.live.step) run.live.step = run.step || 1;
-            run.phase = "writing";
-            run.live.text = (run.live.text + ev.text).slice(-16000);
-            run.live.seq++;
-          } else if (ev.type === "tool_delta" && ev.toolName) {
-            run.live.active = true;
-            run.live.toolName = ev.toolName;
-            run.phase = `tool:${ev.toolName}`;
-            run.live.seq++;
-          } else if (ev.type === "usage" && ev.usage) {
-            run.live.usage = ev.usage;
-            run.live.seq++;
-          }
-        } catch {
-          // ignore malformed stream line
-        }
-      } else if (rawLine.trim()) {
-        touchRunActivity(run);
-        run.stderrTail = (run.stderrTail + rawLine + "\n").slice(-2000);
-      }
+      parser.onStderrLine(rawLine);
     }
   });
 
-  // Idle watchdog: wake up waiting model early if subagent produces zero output for idleTimeoutSec
+  // Idle watchdog
   run.watchdog = setInterval(() => {
     if (!isRunActive(run)) {
       clearInterval(run.watchdog);
       return;
     }
-    // Check if disk session log grew silently
-    if (run.sessionId) {
+    if (run.driver === "dsh" && run.sessionId) {
       try {
         const fp = findSessionFileById(run.sessionId);
         if (fp) {
@@ -645,7 +975,7 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
       run.phase = "stalled";
       run.resolveStall?.(run);
     }
-  }, 10000);
+  }, 10_000);
 
   if (timeoutMs > 0) {
     run.timer = setTimeout(() => {
@@ -661,16 +991,28 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
     }, timeoutMs);
   }
 
+  function cleanupTmpPatches() {
+    for (const p of run.cleanupPaths) {
+      try {
+        if (p && fs.existsSync(p)) fs.unlinkSync(p);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   child.on("close", (code) => {
     clearTimeout(run.timer);
     clearInterval(run.watchdog);
+    if (stdoutBuf.trim()) parser.onStdoutLine(stdoutBuf.trim());
+    if (stderrBuf.trim()) parser.onStderrLine(stderrBuf);
+    parser.flush();
+    cleanupTmpPatches();
+
     run.exitCode = code;
     run.endedAt = Date.now();
     run.stalled = false;
     run.live.active = false;
-    if (stderrBuf.trim() && !stderrBuf.startsWith(STREAM_PREFIX)) {
-      run.stderrTail = (run.stderrTail + stderrBuf).slice(-2000);
-    }
     if (isRunActive(run)) {
       if (code === 0 && !run.error) {
         run.status = "done";
@@ -691,6 +1033,7 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
   child.on("error", (err) => {
     clearTimeout(run.timer);
     clearInterval(run.watchdog);
+    cleanupTmpPatches();
     run.endedAt = Date.now();
     run.stalled = false;
     run.live.active = false;
@@ -705,7 +1048,7 @@ function launchLilaSRun({ task, sessionId, cwd, timeoutSec, idleTimeoutSec }) {
   return { run, sessionReady };
 }
 
-// ---------------------------------------------------------------- Snapshot
+// ---------------------------------------------------------------- Unified Session Snapshot
 
 function collectRecentCwds(sessions) {
   const seen = new Set();
@@ -726,48 +1069,143 @@ function collectRecentCwds(sessions) {
   return out.slice(0, 12);
 }
 
-function buildStateSnapshot({
-  sessionId,
-  scopeCwd = "",
-  allProjects = false,
-  headlessOnly = true,
-  pluginOnly = true,
-  includeHidden = false,
-  maxItems = 180,
-  ifNoneMatch = "",
-} = {}) {
-  const normScope = !allProjects && scopeCwd ? normalizeCwd(scopeCwd) : "";
-  const activeIds = getActiveSessionIds();
+function loadSessionView(sessionId, maxItems = 180) {
+  if (!sessionId) return null;
+  const meta = registry.sessions[sessionId] || {};
+  const run = findRunForSession(sessionId);
 
-  let sessions = listSessions({
-    headlessOnly,
-    allWorkspaces: true,
-    allowedSessionIds: pluginOnly ? getPluginSessionIdSet() : null,
-    hiddenSessionIds: includeHidden ? null : getHiddenSessionIdSet(),
-    limit: 60,
-    activeSessionIds: activeIds,
-  });
+  // 1. Prefer normalized ALilaS timeline for non-DSH sessions
+  const tl = timelineStore.load(sessionId);
+  if (tl && (tl.driver !== "dsh" || !findSessionFileById(sessionId))) {
+    const v = timelineStore.toView(tl, maxItems);
+    v.alias = meta.alias || "";
+    v.pinned = Boolean(meta.pinned);
+    v.hidden = Boolean(meta.hidden);
+    return v;
+  }
 
-  // Collect recentCwds before scoping filter so the cwd picker still knows all projects
-  const recentCwds = collectRecentCwds(sessions);
+  // 2. DSH session reader (with incremental zstd decoding)
+  const fp = findSessionFileById(sessionId);
+  if (fp) {
+    const parsed = parseDshSessionFile(fp, { maxItems });
+    parsed.driver = meta.driver || "dsh";
+    parsed.model = meta.model || "";
+    parsed.effort = meta.effort || "";
+    parsed.contextWindow = inferContextWindow(parsed.model, 1_000_000);
+    parsed.lastTps = run?.tps || 0;
+    parsed.cumulativeTokens = parsed.usage?.totalTokens || 0;
+    parsed.alias = meta.alias || "";
+    parsed.pinned = Boolean(meta.pinned);
+    parsed.hidden = Boolean(meta.hidden);
+    return parsed;
+  }
 
-  sessions = sessions.map((s) => {
-    const meta = registry.sessions[s.sessionId] || {};
+  // 3. In-memory placeholder for a freshly booted run before first flush
+  if (run) {
     return {
-      ...s,
+      sessionId,
+      driver: run.driver,
+      model: run.model,
+      effort: run.effort,
+      contextWindow: run.contextWindow,
+      title: run.task.slice(0, 48),
       alias: meta.alias || "",
       pinned: Boolean(meta.pinned),
       hidden: Boolean(meta.hidden),
+      cwd: run.cwd,
+      isHeadless: true,
+      usage: run.latestUsage || null,
+      lastTps: computeLiveTps(run),
+      cumulativeTokens: run.cumulativeTokens || 0,
+      stats: {
+        totalEvents: 0,
+        turns: run.turn || 1,
+        steps: run.step || 0,
+        reasoningCount: 0,
+        toolCallCount: 0,
+        textCount: 0,
+        totalTimelineItems: 1,
+        truncatedItems: false,
+      },
+      items: [{ kind: "user", seq: 0, turn: 1, step: 0, text: run.task, charCount: run.task.length }],
     };
-  });
+  }
+  return null;
+}
 
-  // Ensure running sessions (even before file flush) appear in list
-  const knownIds = new Set(sessions.map((s) => s.sessionId));
+function listAllUnifiedSessions({
+  headlessOnly = true,
+  pluginOnly = true,
+  includeHidden = false,
+  activeIds = new Set(),
+} = {}) {
+  const hiddenSet = includeHidden ? null : getHiddenSessionIdSet();
+  const allowedSet = pluginOnly ? getPluginSessionIdSet() : null;
+  const map = new Map();
+
+  // A) Normalized ALilaS timelines (agy / claude / codex / etc.)
+  for (const doc of timelineStore.listAll()) {
+    if (hiddenSet?.has(doc.sessionId) && !activeIds.has(doc.sessionId)) continue;
+    if (allowedSet && !allowedSet.has(doc.sessionId) && !activeIds.has(doc.sessionId)) continue;
+    const meta = registry.sessions[doc.sessionId] || {};
+    map.set(doc.sessionId, {
+      sessionId: doc.sessionId,
+      driver: doc.driver || meta.driver || "agy",
+      model: doc.model || meta.model || "",
+      effort: doc.effort || meta.effort || "",
+      contextWindow: doc.contextWindow || inferContextWindow(doc.model, 200_000),
+      workspaceSlug: cwdToWorkspaceSlug(doc.cwd),
+      title: doc.title || doc.sessionId,
+      alias: meta.alias || "",
+      pinned: Boolean(meta.pinned),
+      hidden: Boolean(meta.hidden),
+      cwd: doc.cwd || meta.cwd || "",
+      mtimeMs: doc.mtimeMs || doc.createdAt || 0,
+      sizeBytes: 0,
+      isHeadless: true,
+      isRunning: activeIds.has(doc.sessionId),
+      reasoningCount: doc.reasoningCount || 0,
+      toolCallCount: doc.toolCallCount || 0,
+      textCount: doc.textCount || 0,
+      turns: doc.turns || 0,
+      usage: doc.usage || null,
+    });
+  }
+
+  // B) DSH persisted .jsonl.zstd sessions
+  const dshList = listDshSessions({
+    headlessOnly,
+    allWorkspaces: true,
+    allowedSessionIds: allowedSet,
+    hiddenSessionIds: hiddenSet,
+    limit: 60,
+    activeSessionIds: activeIds,
+  });
+  for (const s of dshList) {
+    if (map.has(s.sessionId)) continue;
+    const meta = registry.sessions[s.sessionId] || {};
+    map.set(s.sessionId, {
+      ...s,
+      driver: meta.driver || "dsh",
+      model: meta.model || "",
+      effort: meta.effort || "",
+      contextWindow: inferContextWindow(meta.model, 1_000_000),
+      alias: meta.alias || "",
+      pinned: Boolean(meta.pinned),
+      hidden: Boolean(meta.hidden),
+    });
+  }
+
+  // C) Active in-memory runs not yet flushed
   for (const r of runs.values()) {
-    if (r.sessionId && !knownIds.has(r.sessionId)) {
+    if (r.sessionId && !map.has(r.sessionId)) {
       const meta = registry.sessions[r.sessionId] || {};
-      sessions.unshift({
+      map.set(r.sessionId, {
         sessionId: r.sessionId,
+        driver: r.driver,
+        model: r.model,
+        effort: r.effort,
+        contextWindow: r.contextWindow,
         workspaceSlug: cwdToWorkspaceSlug(r.cwd),
         title: r.task.slice(0, 48),
         alias: meta.alias || "",
@@ -782,25 +1220,47 @@ function buildStateSnapshot({
         toolCallCount: 0,
         textCount: 0,
         turns: r.turn,
-        usage: r.live.usage || r.lastStepUsage || null,
+        usage: r.latestUsage || null,
       });
     }
   }
 
-  // Apply project scope isolation when scopeCwd is active and allProjects is false
+  return Array.from(map.values());
+}
+
+function buildStateSnapshot({
+  sessionId,
+  scopeCwd = "",
+  allProjects = false,
+  headlessOnly = true,
+  pluginOnly = true,
+  includeHidden = false,
+  maxItems = 180,
+  ifNoneMatch = "",
+} = {}) {
+  const normScope = !allProjects && scopeCwd ? normalizeCwd(scopeCwd) : "";
+  const activeIds = getActiveSessionIds();
+
+  let sessions = listAllUnifiedSessions({
+    headlessOnly,
+    pluginOnly,
+    includeHidden,
+    activeIds,
+  });
+
+  const recentCwds = collectRecentCwds(sessions);
+
   if (normScope) {
     sessions = sessions.filter((s) => normalizeCwd(s.cwd) === normScope);
   }
 
-  // Sort: running first, then pinned, then mtime desc
   sessions.sort((a, b) => {
     if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     return (b.mtimeMs || 0) - (a.mtimeMs || 0);
   });
-  sessions = sessions.slice(0, 35);
+  sessions = sessions.slice(0, 40);
 
-  // Scoped activeRuns (never leak other projects' chips unless allProjects=true)
   const scopedRunObjs = Array.from(runs.values())
     .filter((r) => !normScope || normalizeCwd(r.cwd) === normScope)
     .sort((a, b) => b.startedAt - a.startedAt)
@@ -811,13 +1271,8 @@ function buildStateSnapshot({
     const inList = sessions.some((s) => s.sessionId === selectedId);
     const inRuns = scopedRunObjs.some((r) => r.sessionId === selectedId);
     if (!inList && !inRuns) {
-      if (normScope) {
+      if (normScope || getHiddenSessionIdSet().has(selectedId)) {
         selectedId = null;
-      } else {
-        const fp = findSessionFileById(selectedId);
-        if (!fp || getHiddenSessionIdSet().has(selectedId)) {
-          selectedId = null;
-        }
       }
     }
   }
@@ -835,8 +1290,8 @@ function buildStateSnapshot({
   const activeRunObj = selectedId ? findRunForSession(selectedId) : null;
   const activeRun = serializeRun(activeRunObj);
   const activeRuns = scopedRunObjs.map(serializeRun);
+  const profSnap = profileStore.getSnapshot();
 
-  // Lightweight ETag
   const selectedEntry = sessions.find((s) => s.sessionId === selectedId);
   const etagParts = [
     selectedId || "",
@@ -847,6 +1302,7 @@ function buildStateSnapshot({
     sessions.length,
     sessions[0]?.mtimeMs || 0,
     registryVersion,
+    profileStore.getVersion(),
     headlessOnly ? 1 : 0,
     pluginOnly ? 1 : 0,
     includeHidden ? 1 : 0,
@@ -872,49 +1328,14 @@ function buildStateSnapshot({
       selectedSessionId: selectedId,
       activeRun,
       activeRuns,
+      telemetry: profSnap.telemetry,
       serverTime: Date.now(),
     };
   }
 
-  let activeSession = null;
-  if (selectedId) {
-    const fp = findSessionFileById(selectedId);
-    if (fp) {
-      activeSession = parseSessionFile(fp, { maxItems });
-      const meta = registry.sessions[selectedId] || {};
-      activeSession.alias = meta.alias || "";
-      activeSession.pinned = Boolean(meta.pinned);
-      activeSession.hidden = Boolean(meta.hidden);
-    } else {
-      const r = findRunForSession(selectedId);
-      const meta = registry.sessions[selectedId] || {};
-      activeSession = {
-        sessionId: selectedId,
-        title: r ? r.task.slice(0, 48) : selectedId,
-        alias: meta.alias || "",
-        pinned: Boolean(meta.pinned),
-        hidden: Boolean(meta.hidden),
-        cwd: r ? r.cwd : scopeCwd || DEFAULT_CWD,
-        isHeadless: true,
-        usage: r?.live?.usage || r?.lastStepUsage || null,
-        stats: {
-          totalEvents: 0,
-          turns: r?.turn || 0,
-          steps: r?.step || 0,
-          reasoningCount: 0,
-          toolCallCount: 0,
-          textCount: 0,
-          totalTimelineItems: r ? 1 : 0,
-          truncatedItems: false,
-        },
-        items: r
-          ? [{ kind: "user", seq: 0, turn: 1, step: 0, text: r.task, charCount: r.task.length }]
-          : [],
-      };
-    }
-  }
+  const activeSession = loadSessionView(selectedId, maxItems);
 
-  // Deduplicate live stream against already-flushed .zstd cards
+  // Deduplicate live stream against already-flushed cards
   if (activeRun?.live?.active && activeSession?.items?.length) {
     const live = activeRun.live;
     const recentTail = activeSession.items.slice(-6);
@@ -951,6 +1372,10 @@ function buildStateSnapshot({
     headlessOnly,
     pluginOnly,
     recentCwds,
+    drivers: getDetectedDrivers(false),
+    defaultSelection: profSnap.defaultSelection,
+    customProfiles: profSnap.customProfiles,
+    telemetry: profSnap.telemetry,
     sessions,
     activeRun,
     activeRuns,
@@ -962,29 +1387,25 @@ function buildStateSnapshot({
 // ---------------------------------------------------------------- MCP Server
 
 const server = new McpServer({
-  name: "lilas-subagent",
-  version: "2.1.0",
+  name: "alilas",
+  version: "3.0.0",
 });
 
 registerAppResource(
   server,
-  "LilaS",
+  "ALilaS",
   APP_URI,
   {
-    description: "LilaS 子代理实时面板：查看原生思维链、工具调用、上下文用量与项目隔离分身状态",
+    description: "ALilaS (better-subagent): 多引擎子代理实时思维链、模型切换与上下文/TPS 遥测面板",
     mimeType: RESOURCE_MIME_TYPE,
-    _meta: {
-      ui: {
-        prefersBorder: false,
-      },
-    },
+    _meta: { ui: { prefersBorder: false } },
   },
   async () => {
     let html;
     try {
       html = fs.readFileSync(APP_HTML_PATH, "utf8");
     } catch (e) {
-      html = `<!doctype html><html><body><h3>UI 尚未构建</h3><pre>${String(e.message)}</pre></body></html>`;
+      html = `<!doctype html><html><body><h3>UI 尚未构建，请运行 node ui/build.mjs</h3><pre>${String(e.message)}</pre></body></html>`;
     }
     return {
       contents: [
@@ -999,31 +1420,19 @@ registerAppResource(
   },
 );
 
-// 1) Open or focus the side pane (ONLY UI tool — eliminates duplicate inline panes)
+// 1) Open or focus side pane
 registerAppTool(
   server,
-  "lilas_open_pane",
+  "alilas_open_pane",
   {
-    title: "LilaS",
+    title: "ALilaS",
     description:
-      "在 Antigravity 侧边栏打开或刷新 LilaS 实时思维链面板。传入 session_id 或 cwd 时自动按该项目隔离显示，不串其他项目的子代理。",
+      "在 Antigravity 侧边栏打开或刷新 ALilaS 增强子代理面板。传入 session_id 或 cwd 自动按当前项目隔离显示。",
     inputSchema: {
-      session_id: z
-        .string()
-        .optional()
-        .describe("可选：指定要展示的会话 ID；自动反推所属项目目录进行隔离"),
-      cwd: z
-        .string()
-        .optional()
-        .describe("可选：当前项目根目录，用于将面板默认隔离在当前项目内"),
-      headless_only: z
-        .boolean()
-        .optional()
-        .describe("可选：是否仅显示 Mode A 子代理会话（默认 true）"),
-      all_projects: z
-        .boolean()
-        .optional()
-        .describe("可选：设为 true 时跨所有项目展示全部会话"),
+      session_id: z.string().optional().describe("可选：指定会话 ID；自动反推项目目录隔离"),
+      cwd: z.string().optional().describe("可选：当前项目目录，用于默认项目隔离"),
+      headless_only: z.boolean().optional().describe("可选：是否仅显示子代理会话（默认 true）"),
+      all_projects: z.boolean().optional().describe("可选：设为 true 显示跨所有项目会话"),
     },
     _meta: PANE_META,
   },
@@ -1043,8 +1452,8 @@ registerAppTool(
     const label = s ? s.alias || s.title : "";
     const scopeHint = snap.scopeCwd ? `（项目隔离: ${snap.scopeCwd}）` : "（全部项目）";
     const summary = s
-      ? `已打开 LilaS 面板${scopeHint}：会话 ${s.sessionId}（${label}），共 ${s.stats.reasoningCount} 段思维链、${s.stats.toolCallCount} 次工具调用、${s.stats.textCount} 条回复。`
-      : `已打开 LilaS 面板${scopeHint}，当前暂无 Mode A 会话记录。`;
+      ? `已打开 ALilaS 面板${scopeHint}：会话 ${s.sessionId} [${s.driver}/${s.model || "default"}]（${label}），思考 ${s.stats.reasoningCount} · 工具 ${s.stats.toolCallCount} · 回复 ${s.stats.textCount}。`
+      : `已打开 ALilaS 面板${scopeHint}，当前暂无会话记录。`;
     return {
       content: [{ type: "text", text: summary }],
       structuredContent: {
@@ -1059,31 +1468,39 @@ registerAppTool(
   },
 );
 
-// 2) Start a Mode A subagent task (renders project-isolated inline card in chat + syncs with side pane)
+// 2) Start a subagent task (multi-driver + per-run model override + inline project-isolated card)
 registerAppTool(
   server,
-  "lilas_start_task",
+  "alilas_start_task",
   {
-    title: "派活给 LilaS",
+    title: "派活给 ALilaS",
     description:
-      "以 Mode A（dsh headless）异步启动 LilaS 子代理执行任务，在对话流内展示按当前项目隔离的紧凑 LilaS 状态卡并返回 run_id、session_id 与 cwd。启动后可调用 lilas_open_pane(session_id, cwd) 同步右侧大窗，再调用 lilas_wait_task(run_id) 分段等待并验收。",
+      "以无头子代理模式异步启动 ALilaS 执行任务，支持 agy（Antigravity 原生模型）/ dsh（DeepSeek Harness & 自定义上游）/ claude / codex 四个引擎，每次运行独立传参零冲突，默认不限总时长并启用 180s 无活动看门狗。",
     inputSchema: {
       task: z.string().min(1).describe("任务说明书（背景、目标文件绝对路径、允许/禁止边界、验收标准）"),
-      session_id: z
-        .string()
+      session_id: z.string().optional().describe("可选：复用已有会话 ID；新主题留空"),
+      cwd: z.string().optional().describe("新建会话时的工作目录（务必传当前项目目录）"),
+      driver: z
+        .enum(["auto", "agy", "dsh", "claude", "codex"])
         .optional()
-        .describe("可选：复用已有 Mode A 会话 ID（自动继承原 cwd，前置拦截桌面端会话）；新主题留空"),
-      cwd: z
-        .string()
+        .describe("可选：指定底层驱动（默认按用户配置的默认子代理模型自动选择）"),
+      model: z.string().optional().describe("可选：本次运行指定的模型 ID（与并发其他会话零冲突）"),
+      effort: z
+        .enum(["low", "medium", "high", "xhigh", "max"])
         .optional()
-        .describe("新建会话时的工作目录（务必传当前项目目录）；复用 session_id 时自动继承原会话 cwd"),
+        .describe("可选：推理强度"),
+      profile_id: z.string().optional().describe("可选：使用自定义上游模型预设 ID"),
+      permission_mode: z
+        .enum(["auto", "readonly"])
+        .optional()
+        .describe("可选：auto（默认自动执行）或 readonly（只读审计/规划）"),
       timeout_sec: z
         .number()
         .int()
         .min(0)
         .max(86400)
         .optional()
-        .describe("可选：总超时硬上限（秒），默认 0 表示不限制总时长（防误杀长任务，仅靠无活动看门狗监测卡死）"),
+        .describe("可选：总超时硬上限（秒），默认 0 不限总时长"),
       idle_timeout_sec: z
         .number()
         .int()
@@ -1096,28 +1513,33 @@ registerAppTool(
   },
   async (args) => {
     try {
-      const { run, sessionReady } = launchLilaSRun({
+      const { run, sessionReady } = launchSubagentRun({
         task: args.task,
         sessionId: args.session_id,
         cwd: args.cwd,
+        driver: args.driver,
+        model: args.model,
+        effort: args.effort,
+        profileId: args.profile_id,
+        permissionMode: args.permission_mode || "auto",
         timeoutSec: args.timeout_sec,
         idleTimeoutSec: args.idle_timeout_sec,
       });
 
-      // Wait up to 10s for Windows cold-start DSH to emit exact sessionId
       await Promise.race([
         sessionReady,
-        new Promise((r) => setTimeout(r, 10000)),
+        new Promise((r) => setTimeout(r, 10_000)),
       ]);
 
       const info = serializeRun(run);
       const text = [
-        `已启动 LilaS 任务（run_id: ${info.runId}）`,
+        `已启动 ALilaS 任务（run_id: ${info.runId}）`,
+        `引擎: ${info.driver} | 模型: ${info.model || "default"} (${info.effort}) | 模式: ${info.permissionMode}`,
         `session_id: ${info.sessionId || "初始化中..."} | cwd: ${info.cwd}`,
         `状态: ${info.status} (${info.phase}) | 无活动告警阈值: ${info.idleTimeoutSec}s`,
         info.error
           ? `错误: ${info.error}`
-          : `建议紧接着调用 lilas_open_pane(session_id="${info.sessionId || ""}", cwd="${info.cwd}") 同步右侧大窗，再调用 lilas_wait_task(run_id="${info.runId}") 分段等待。`,
+          : `建议调用 alilas_open_pane(session_id="${info.sessionId || ""}", cwd="${info.cwd}") 同步右侧大窗，再调用 alilas_wait_task(run_id="${info.runId}") 分段等待。`,
       ].join("\n");
 
       return {
@@ -1133,41 +1555,29 @@ registerAppTool(
     } catch (e) {
       return {
         isError: true,
-        content: [{ type: "text", text: `启动 LilaS 失败: ${e.message}` }],
+        content: [{ type: "text", text: `启动 ALilaS 失败: ${e.message}` }],
       };
     }
   },
 );
 
-// 3) Wait for (or inspect status of) a started run with heartbeat & stall/refusal alerts
+// 3) Heartbeat wait + stall & refusal alerts
 server.registerTool(
-  "lilas_wait_task",
+  "alilas_wait_task",
   {
-    title: "等待或查询 LilaS 任务进度",
+    title: "等待或查询 ALilaS 任务进度",
     description:
-      "分段等待 LilaS 任务完成（默认每次最多等 90 秒；若检测到无活动卡死会提前唤醒）。返回状态、静默时长 idleSec、思维链摘录、完整回复及风控截断告警。",
+      "分段等待 ALilaS 任务完成（默认 90s；检测卡死自动提前唤醒），返回静默时长、上下文占用、TPS、思维链摘录与完整回复（最高 32K 字）。",
     inputSchema: {
-      run_id: z.string().describe("lilas_start_task 返回的 run_id"),
-      wait_sec: z
-        .number()
-        .int()
-        .min(1)
-        .max(600)
-        .optional()
-        .describe("本次最多等待秒数，默认 90（推荐 60~120 分段轮询，避免盲等 10 分钟）"),
-      status_only: z
-        .boolean()
-        .optional()
-        .describe("设为 true 时不阻塞等待，立即返回当前阶段、步数、静默秒数与实时思维链"),
+      run_id: z.string().describe("alilas_start_task 返回的 run_id"),
+      wait_sec: z.number().int().min(1).max(600).optional().describe("本次最多等待秒数，默认 90"),
+      status_only: z.boolean().optional().describe("设为 true 立即返回当前实时进度"),
     },
   },
   async ({ run_id, wait_sec = 90, status_only = false }) => {
     const run = runs.get(run_id);
     if (!run) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: `未找到 run_id: ${run_id}` }],
-      };
+      return { isError: true, content: [{ type: "text", text: `未找到 run_id: ${run_id}` }] };
     }
 
     if (!status_only && isRunActive(run) && !run.stalled) {
@@ -1179,36 +1589,31 @@ server.registerTool(
     }
 
     const info = serializeRun(run);
-    let parsed = null;
-    if (run.sessionId) {
-      const fp = findSessionFileById(run.sessionId);
-      if (fp) parsed = parseSessionFile(fp, { maxItems: 60 });
-    }
+    const parsed = run.sessionId ? loadSessionView(run.sessionId, 60) : null;
 
     const lines = [
-      `run_id: ${info.runId} | session_id: ${info.sessionId || "N/A"} | cwd: ${info.cwd}`,
-      `状态: ${info.status}${info.stalled ? " [STALLED/疑似卡死]" : ""} (${info.phase}) | Turn ${info.turn} Step ${info.step} | 已耗时: ${info.elapsedSec}s | 静默: ${info.idleSec}s | exitCode: ${info.exitCode}`,
+      `run_id: ${info.runId} | session_id: ${info.sessionId || "N/A"} | [${info.driver}/${info.model || "default"}] | cwd: ${info.cwd}`,
+      `状态: ${info.status}${info.stalled ? " [STALLED/疑似卡死]" : ""} (${info.phase}) | Turn ${info.turn} Step ${info.step} | 耗时: ${info.elapsedSec}s | 静默: ${info.idleSec}s | exitCode: ${info.exitCode}`,
     ];
     if (info.error) lines.push(`错误: ${info.error}`);
 
     const usage = info.usage || parsed?.usage;
+    const cw = info.contextWindow || parsed?.contextWindow || 200_000;
     if (usage?.totalTokens) {
-      const pct = ((usage.totalTokens / 1_000_000) * 100).toFixed(1);
+      const pct = ((usage.totalTokens / cw) * 100).toFixed(1);
       lines.push(
-        `上下文: ${(usage.totalTokens / 1000).toFixed(1)}K / 1M (${pct}%) | cacheRead: ${((usage.cacheReadTokens || 0) / 1000).toFixed(1)}K`,
+        `遥测: 上下文 ${(usage.totalTokens / 1000).toFixed(1)}K / ${(cw / 1000).toFixed(0)}K (${pct}%) | TPS: ${info.tps || parsed?.lastTps || 0} tok/s | cacheRead: ${((usage.cacheReadTokens || 0) / 1000).toFixed(1)}K`,
       );
     }
 
     if (parsed?.stats) {
       lines.push(
-        `统计: 思维链 ${parsed.stats.reasoningCount} 段 | 工具调用 ${parsed.stats.toolCallCount} 次（本次运行 ${run.toolCallsInRun} 次） | 回复 ${parsed.stats.textCount} 条`,
+        `统计: 思考 ${parsed.stats.reasoningCount} 段 | 工具 ${parsed.stats.toolCallCount} 次（本轮 ${run.toolCallsInRun} 次） | 回复 ${parsed.stats.textCount} 条`,
       );
-      const recentReasonings = (parsed.items || [])
-        .filter((it) => it.kind === "reasoning")
-        .slice(-5);
-      if (recentReasonings.length) {
-        lines.push("\n--- 最近原生思维链摘录 ---");
-        for (const r of recentReasonings) {
+      const recentR = (parsed.items || []).filter((it) => it.kind === "reasoning").slice(-5);
+      if (recentR.length) {
+        lines.push("\n--- 最近思维链摘录 ---");
+        for (const r of recentR) {
           lines.push(`[step ${r.step}] ${r.text.replace(/\s+/g, " ").slice(0, 300)}`);
         }
       }
@@ -1225,15 +1630,15 @@ server.registerTool(
 
     if (info.stalled) {
       lines.push(
-        `\n⚠️ 疑似卡死告警：子代理已连续 ${info.idleSec}s 无任何输出/工具活动（阈值 ${info.idleTimeoutSec}s）。请判断是否卡住；若确认卡死，请立即调用 lilas_stop_task(run_id="${info.runId}") 强杀进程树，然后重新派活。`,
+        `\n⚠️ 疑似卡死告警：已连续 ${info.idleSec}s 无任何活动（阈值 ${info.idleTimeoutSec}s）。若确认卡死，请调用 alilas_stop_task(run_id="${info.runId}") 强杀后重新派活。`,
       );
     } else if (isRunActive(run)) {
       lines.push(
-        `\n⏳ 任务仍在正常推进中（未完成，距上次活动 ${info.idleSec}s）。请再次调用 lilas_wait_task(run_id="${info.runId}", wait_sec=90) 继续跟进，勿假定已完成。`,
+        `\n⏳ 任务仍在推进中（静默 ${info.idleSec}s）。请再次调用 alilas_wait_task(run_id="${info.runId}", wait_sec=90) 继续跟进。`,
       );
     } else if (refusalMatch && run.toolCallsInRun === 0) {
       lines.push(
-        `\n⚠️ 上游风控截断告警：本轮 0 次工具调用且回复包含 "${refusalMatch[0]}"，子代理未执行实际任务！请自动重新派活（建议留空 session_id 新开会话，并用简洁客观的技术指令描述任务）。`,
+        `\n⚠️ 上游风控截断告警：本轮 0 次工具调用且回复包含 "${refusalMatch[0]}"，请留空 session_id 用客观技术指令自动重试一次。`,
       );
     }
 
@@ -1243,92 +1648,121 @@ server.registerTool(
         rawFinal.length > MAX_FINAL
           ? rawFinal.slice(0, MAX_FINAL) + `\n…（已截断，完整回复共 ${rawFinal.length} 字）`
           : rawFinal;
-      lines.push("\n--- LilaS 最终回复 ---\n" + body);
+      lines.push("\n--- ALilaS 最终回复 ---\n" + body);
     }
 
-    return {
-      content: [{ type: "text", text: lines.join("\n") }],
-    };
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   },
 );
 
-// 4) Stop a running/stalled task (Model-visible!)
+// 4) Stop task (model-visible)
 server.registerTool(
-  "lilas_stop_task",
+  "alilas_stop_task",
   {
-    title: "中止卡死或运行中的 LilaS 任务",
-    description:
-      "强杀指定 run_id 的 LilaS 子代理及其 Windows 子进程树，释放同一 session_id 的并发锁，方便立即重新派活。",
+    title: "中止 ALilaS 任务",
+    description: "强杀指定 run_id 的子代理及整棵子进程树，释放并发锁便于立即重派。",
     inputSchema: {
       run_id: z.string().describe("要中止的 run_id"),
-      reason: z.string().optional().describe("可选：中止原因（默认 stopped_by_model）"),
+      reason: z.string().optional().describe("可选：中止原因"),
     },
   },
   async ({ run_id, reason }) => {
     const run = stopRunById(run_id, reason || "stopped_by_model");
     if (!run) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: `未找到 run_id: ${run_id}` }],
-      };
+      return { isError: true, content: [{ type: "text", text: `未找到 run_id: ${run_id}` }] };
     }
     const info = serializeRun(run);
     return {
       content: [
         {
           type: "text",
-          text: `已中止任务 ${info.runId}（session_id: ${info.sessionId || "N/A"}，耗时 ${info.elapsedSec}s）。现在可以安全地重新调用 lilas_start_task 派活。`,
+          text: `已中止 ${info.runId}（[${info.driver}] session_id: ${info.sessionId || "N/A"}，耗时 ${info.elapsedSec}s）。`,
         },
       ],
     };
   },
 );
 
-// 5) List sessions (model tool)
+// 5) List available drivers & models (model-visible!)
 server.registerTool(
-  "lilas_list_sessions",
+  "alilas_list_models",
   {
-    title: "列出 LilaS 会话",
-    description: "列出本机 Mode A 子代理会话；可按 cwd 过滤当前项目，或省略 cwd 跨项目列出。",
+    title: "列出可用子代理引擎与模型",
+    description: "查看当前机器已安装的引擎（agy / dsh / claude / codex）、原生及自定义模型列表与当前默认配置。",
+    inputSchema: {
+      refresh: z.boolean().optional().describe("设为 true 强制重新探测 CLI 与模型目录"),
+    },
+  },
+  async ({ refresh = false } = {}) => {
+    const drivers = getDetectedDrivers(refresh);
+    const prof = profileStore.getSnapshot();
+    const lines = [
+      `默认子代理选择: driver=${prof.defaultSelection.driver || "auto"} | model=${prof.defaultSelection.model || "auto"} | effort=${prof.defaultSelection.effort || "high"}`,
+      "",
+    ];
+    for (const d of drivers) {
+      lines.push(`### ${d.label} (${d.id}) — ${d.installed ? "✅ 已就绪" : "⚪ 未安装"} (${d.detail})`);
+      if (d.models?.length) {
+        lines.push(d.models.slice(0, 12).map((m) => `  - ${m.id} (${m.name})`).join("\n"));
+        if (d.models.length > 12) lines.push(`  ... 等共 ${d.models.length} 个模型`);
+      }
+    }
+    if (prof.customProfiles.length) {
+      lines.push("\n### 自定义上游预设");
+      for (const p of prof.customProfiles) {
+        lines.push(`  - ${p.id}: ${p.name} [${p.driver}/${p.model}] (baseURL: ${p.baseURL || "默认"}, keyEnv: ${p.apiKeyEnv || "默认"})`);
+      }
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+// 6) List sessions
+server.registerTool(
+  "alilas_list_sessions",
+  {
+    title: "列出 ALilaS 会话",
+    description: "列出各引擎子代理会话，支持按 cwd 过滤当前项目。",
     inputSchema: {
       cwd: z.string().optional().describe("可选：仅列出指定项目目录的会话"),
-      headless_only: z.boolean().optional().describe("默认 true，仅列 Mode A 子代理会话"),
+      headless_only: z.boolean().optional().describe("默认 true"),
       limit: z.number().int().min(1).max(50).optional().describe("返回条数，默认 15"),
     },
   },
   async ({ cwd, headless_only = true, limit = 15 } = {}) => {
     const normFilter = cwd ? normalizeCwd(cwd) : "";
-    let list = listSessions({
+    let list = listAllUnifiedSessions({
       headlessOnly: headless_only,
-      allWorkspaces: true,
-      hiddenSessionIds: getHiddenSessionIdSet(),
-      limit: normFilter ? 60 : limit,
-      activeSessionIds: getActiveSessionIds(),
+      pluginOnly: false,
+      includeHidden: false,
+      activeIds: getActiveSessionIds(),
     });
-    if (normFilter) {
-      list = list.filter((s) => normalizeCwd(s.cwd) === normFilter).slice(0, limit);
-    }
+    if (normFilter) list = list.filter((s) => normalizeCwd(s.cwd) === normFilter);
+    list.sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0));
+    list = list.slice(0, limit);
     const text = list.length
       ? list
-          .map((s) => {
-            const meta = registry.sessions[s.sessionId] || {};
-            const label = meta.alias ? `${meta.alias} · ${s.title}` : s.title;
-            const pin = meta.pinned ? "📌" : "";
-            return `- ${pin}${s.sessionId} [${s.isRunning ? "运行中" : s.isHeadless ? "Mode A" : "桌面端"}] (${s.cwd || s.workspaceSlug}) 思维链:${s.reasoningCount} 工具:${s.toolCallCount} | ${label}`;
-          })
+          .map(
+            (s) =>
+              `- ${s.pinned ? "📌" : ""}${s.sessionId} [${s.isRunning ? "运行中" : s.driver}${
+                s.model ? "/" + s.model : ""
+              }] (${s.cwd || s.workspaceSlug}) 思:${s.reasoningCount} 工:${s.toolCallCount} | ${
+                s.alias || s.title
+              }`,
+          )
           .join("\n")
       : "暂无符合条件的会话。";
     return { content: [{ type: "text", text }] };
   },
 );
 
-// 6) App-only: Poll live state & timeline with project scoping & ETag
+// 7) App-only: Poll live state
 registerAppTool(
   server,
-  "lilas_poll_state",
+  "alilas_poll_state",
   {
-    title: "轮询 LilaS 实时状态（App 内部）",
-    description: "供 LilaS 面板按项目隔离轮询会话列表、运行状态、打字机流与时间线。",
+    title: "轮询 ALilaS 状态（App 内部）",
+    description: "按项目隔离轮询会话、运行态、逐字流、驱动模型目录与遥测指标。",
     inputSchema: {
       session_id: z.string().optional(),
       scope_cwd: z.string().optional(),
@@ -1359,27 +1793,37 @@ registerAppTool(
   },
 );
 
-// 7) App-only: Send a task directly from the side pane UI
+// 8) App-only: Send task from UI (supports driver/model/effort/profile/permissionMode)
 registerAppTool(
   server,
-  "lilas_ui_send_task",
+  "alilas_ui_send_task",
   {
-    title: "面板内派活给 LilaS（App 内部）",
-    description: "供 LilaS 面板直接发送 Mode A 任务。",
+    title: "面板派活给 ALilaS（App 内部）",
+    description: "供 ALilaS 面板直接按所选引擎、模型与模式派发子代理任务。",
     inputSchema: {
       task: z.string().min(1),
       session_id: z.string().optional(),
       cwd: z.string().optional(),
+      driver: z.enum(["auto", "agy", "dsh", "claude", "codex"]).optional(),
+      model: z.string().optional(),
+      effort: z.string().optional(),
+      profile_id: z.string().optional(),
+      permission_mode: z.enum(["auto", "readonly"]).optional(),
       timeout_sec: z.number().int().min(0).max(86400).optional(),
     },
     _meta: APP_ONLY_META,
   },
   async (args) => {
     try {
-      const { run, sessionReady } = launchLilaSRun({
+      const { run, sessionReady } = launchSubagentRun({
         task: args.task,
         sessionId: args.session_id,
         cwd: args.cwd,
+        driver: args.driver,
+        model: args.model,
+        effort: args.effort,
+        profileId: args.profile_id,
+        permissionMode: args.permission_mode || "auto",
         timeoutSec: args.timeout_sec,
       });
       await Promise.race([
@@ -1400,16 +1844,14 @@ registerAppTool(
   },
 );
 
-// 8) App-only: Stop a running task from UI
+// 9) App-only: Stop task from UI
 registerAppTool(
   server,
-  "lilas_ui_stop_task",
+  "alilas_ui_stop_task",
   {
-    title: "中止 LilaS 当前任务（App 内部）",
-    description: "供 LilaS 面板中止正在运行的子代理任务及其子进程树。",
-    inputSchema: {
-      run_id: z.string(),
-    },
+    title: "中止 ALilaS 任务（App 内部）",
+    description: "面板停止按钮强杀子进程树。",
+    inputSchema: { run_id: z.string() },
     _meta: APP_ONLY_META,
   },
   async ({ run_id }) => {
@@ -1421,13 +1863,13 @@ registerAppTool(
   },
 );
 
-// 9) App-only: Manage session metadata (rename / pin / hide)
+// 10) App-only: Manage session metadata
 registerAppTool(
   server,
-  "lilas_ui_manage_session",
+  "alilas_ui_manage_session",
   {
-    title: "管理 LilaS 会话元数据（App 内部）",
-    description: "为会话设置别名、置顶或从列表隐藏（不修改硬盘原始日志）。",
+    title: "管理 ALilaS 会话元数据（App 内部）",
+    description: "重命名、置顶或隐藏会话。",
     inputSchema: {
       session_id: z.string().min(1),
       action: z.enum(["rename", "pin", "unpin", "hide", "unhide"]),
@@ -1438,6 +1880,10 @@ registerAppTool(
   async ({ session_id, action, alias }) => {
     if (!registry.sessions[session_id]) {
       registry.sessions[session_id] = {
+        driver: session_id.startsWith("session-") ? "dsh" : "agy",
+        model: "",
+        effort: "",
+        profileId: "",
         alias: "",
         pinned: false,
         hidden: false,
@@ -1446,22 +1892,71 @@ registerAppTool(
       };
     }
     const meta = registry.sessions[session_id];
-    if (action === "rename") {
-      meta.alias = (alias || "").trim().slice(0, 60);
-    } else if (action === "pin") {
-      meta.pinned = true;
-    } else if (action === "unpin") {
-      meta.pinned = false;
-    } else if (action === "hide") {
-      meta.hidden = true;
-      meta.pinned = false;
-    } else if (action === "unhide") {
-      meta.hidden = false;
-    }
+    if (action === "rename") meta.alias = (alias || "").trim().slice(0, 60);
+    else if (action === "pin") meta.pinned = true;
+    else if (action === "unpin") meta.pinned = false;
+    else if (action === "hide") { meta.hidden = true; meta.pinned = false; }
+    else if (action === "unhide") meta.hidden = false;
     saveRegistry(registry);
     return {
       content: [{ type: "text", text: "ok" }],
       structuredContent: { sessionId: session_id, meta },
+    };
+  },
+);
+
+// 11) App-only: Manage model defaults & custom upstream profiles
+registerAppTool(
+  server,
+  "alilas_ui_manage_profiles",
+  {
+    title: "管理 ALilaS 默认模型与自定义上游（App 内部）",
+    description: "设置默认子代理引擎/模型，或增删自定义上游预设（仅存环境变量名，不存明文 Key）。",
+    inputSchema: {
+      action: z.enum(["set_default", "upsert_profile", "delete_profile", "refresh_drivers"]),
+      driver: z.string().optional(),
+      model: z.string().optional(),
+      effort: z.string().optional(),
+      profile_id: z.string().optional(),
+      profile: z
+        .object({
+          id: z.string().optional(),
+          name: z.string(),
+          driver: z.enum(["dsh", "claude", "codex", "agy"]),
+          provider: z.string().optional(),
+          baseURL: z.string().optional(),
+          apiKeyEnv: z.string().optional(),
+          api: z.string().optional(),
+          model: z.string(),
+          contextWindow: z.number().int().positive().optional(),
+          maxTokens: z.number().int().positive().optional(),
+          effort: z.string().optional(),
+        })
+        .optional(),
+    },
+    _meta: APP_ONLY_META,
+  },
+  async (args) => {
+    if (args.action === "set_default") {
+      profileStore.setDefaultSelection({
+        driver: args.driver ?? "",
+        model: args.model ?? "",
+        effort: args.effort ?? "high",
+        profileId: args.profile_id ?? "",
+      });
+    } else if (args.action === "upsert_profile" && args.profile) {
+      profileStore.upsertCustomProfile(args.profile);
+    } else if (args.action === "delete_profile" && args.profile_id) {
+      profileStore.deleteCustomProfile(args.profile_id);
+    } else if (args.action === "refresh_drivers") {
+      getDetectedDrivers(true);
+    }
+    return {
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: {
+        drivers: getDetectedDrivers(false),
+        ...profileStore.getSnapshot(),
+      },
     };
   },
 );
@@ -1476,14 +1971,8 @@ function cleanup() {
     }
   }
 }
-process.on("SIGTERM", () => {
-  cleanup();
-  process.exit(0);
-});
-process.on("SIGINT", () => {
-  cleanup();
-  process.exit(0);
-});
+process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+process.on("SIGINT", () => { cleanup(); process.exit(0); });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

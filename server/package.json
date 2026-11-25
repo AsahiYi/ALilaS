@@ -1,11 +1,12 @@
 {
-  "name": "lilas-mcp-server",
-  "version": "2.1.0",
+  "name": "alilas-mcp-server",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "MCP App server bridging DeepSeek Harness (Mode A) into Antigravity",
+  "description": "Multi-engine better-subagent MCP App server for Antigravity (AGY / DSH / Claude Code / Codex CLI)",
   "scripts": {
     "build:ui": "node ../ui/build.mjs",
+    "test": "node --test ../tests/drivers.test.mjs",
     "start": "node ./index.mjs"
   },
   "engines": {

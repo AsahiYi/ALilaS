@@ -5,6 +5,7 @@ import zlib from "node:zlib";
 
 const ZSTD_MAGIC = 0xfd2fb528;
 const DEFAULT_SESSIONS_ROOT =
+  process.env.ALILAS_DSH_SESSIONS_DIR ||
   process.env.LILAS_DSH_SESSIONS_DIR ||
   path.join(os.homedir(), ".dsh", "sessions");
 const DEFAULT_WORKSPACE_SLUG = "";

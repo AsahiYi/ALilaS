@@ -1,9 +1,9 @@
 ﻿$ErrorActionPreference = "Stop"
 
 $RepoDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$TargetDir = Join-Path $env:USERPROFILE ".gemini\config\plugins\lilas"
+$TargetDir = Join-Path $env:USERPROFILE ".gemini\config\plugins\alilas"
 
-Write-Host "==> Installing LilaS into $TargetDir"
+Write-Host "==> Installing ALilaS into $TargetDir"
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 
 $Items = @(
@@ -28,13 +28,13 @@ try {
   Pop-Location
 }
 
-Write-Host "==> Building self-contained LilaS UI"
+Write-Host "==> Building self-contained ALilaS UI"
 node (Join-Path $TargetDir "ui\build.mjs")
 
 $PatchDst = Join-Path $TargetDir "config\mode_a_patch.yml"
 $PatchExample = Join-Path $TargetDir "config\mode_a_patch.example.yml"
 if (-not (Test-Path $PatchDst) -and (Test-Path $PatchExample)) {
-  Write-Host "Tip: Copy config\mode_a_patch.example.yml to config\mode_a_patch.yml to configure custom provider/model overrides."
+  Write-Host "Tip: Copy config\mode_a_patch.example.yml to config\mode_a_patch.yml for custom DSH provider defaults."
 }
 
-Write-Host "==> Done! Open Antigravity and launch LilaS from the '+' side pane menu or left sidebar."
+Write-Host "==> Done! Launch ALilaS from Antigravity's '+' side pane menu or left sidebar."
