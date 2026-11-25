@@ -924,6 +924,20 @@ function launchSubagentRun({
         run.timelineDoc.cumulativeInputTokens = (run.timelineDoc.cumulativeInputTokens || 0) + inputTokens;
         run.timelineDoc.cumulativeCacheReadTokens = (run.timelineDoc.cumulativeCacheReadTokens || 0) + cacheReadTokens;
         run.timelineDoc.cumulativeOutputTokens = (run.timelineDoc.cumulativeOutputTokens || 0) + genTokens;
+        if (!Array.isArray(run.timelineDoc.recentSteps)) run.timelineDoc.recentSteps = [];
+        run.timelineDoc.recentSteps.unshift({
+          time: nowTs,
+          turn: run.turn,
+          step: run.step,
+          inputTokens,
+          cacheReadTokens,
+          outputTokens: genTokens,
+          totalTokens: stepTotal,
+          durationSec: run.lastStepDurationSec || 0,
+          tps: run.tps || 0,
+          ttftSec: run.lastTtftSec || 0,
+        });
+        run.timelineDoc.recentSteps = run.timelineDoc.recentSteps.slice(0, 15);
         timelineStore.save(run.timelineDoc);
       }
       run.stepStartAt = 0;
@@ -1301,6 +1315,158 @@ function listAllUnifiedSessions({
   return Array.from(map.values());
 }
 
+// ---------------------------------------------------------------- Unified Telemetry Aggregator
+
+let unifiedTelemetryCache = null;
+let unifiedTelemetryAt = 0;
+let unifiedTelemetryVer = "";
+
+function getUnifiedTelemetry(profSnap) {
+  const now = Date.now();
+  const verKey = `${registryVersion}:${profileStore.getVersion()}:${getActiveSessionIds().size}`;
+  if (unifiedTelemetryCache && unifiedTelemetryVer === verKey && now - unifiedTelemetryAt < 20_000) {
+    return unifiedTelemetryCache;
+  }
+
+  const base = profSnap.telemetry || {};
+  let scanTokens = 0;
+  let scanInput = 0;
+  let scanCache = 0;
+  let scanOutput = 0;
+  let scanSessions = 0;
+  const scanByDriver = {};
+  const scanByModel = {};
+  const scanDaily = {};
+
+  const addDaily = (dayKey, tok, inp, cache, out, runsCnt) => {
+    if (!dayKey || tok <= 0) return;
+    const prev = scanDaily[dayKey] || { tokens: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, runs: 0 };
+    prev.tokens += tok;
+    prev.inputTokens += inp;
+    prev.cacheReadTokens += cache;
+    prev.outputTokens += out;
+    prev.runs += runsCnt;
+    scanDaily[dayKey] = prev;
+  };
+
+  const seenSids = new Set();
+
+  // 1. Scan normalized timelines (agy / claude / codex)
+  for (const doc of timelineStore.listAll()) {
+    seenSids.add(doc.sessionId);
+    const tok = doc.cumulativeTokens || doc.usage?.totalTokens || 0;
+    if (tok <= 0) continue;
+    scanSessions++;
+    const inp = doc.cumulativeInputTokens || doc.usage?.inputTokens || 0;
+    const cache = doc.cumulativeCacheReadTokens || doc.usage?.cacheReadTokens || 0;
+    const out = doc.cumulativeOutputTokens || doc.usage?.outputTokens || 0;
+    const drv = doc.driver || "agy";
+    const mKey = doc.model ? `${drv}/${doc.model}` : drv;
+    scanTokens += tok;
+    scanInput += inp;
+    scanCache += cache;
+    scanOutput += out;
+    scanByDriver[drv] = (scanByDriver[drv] || 0) + tok;
+    const pm = scanByModel[mKey] || { tokens: 0, runs: 0, lastTps: 0 };
+    pm.tokens += tok;
+    pm.runs += Math.max(1, doc.turns || 1);
+    if (doc.lastTps > 0) pm.lastTps = doc.lastTps;
+    scanByModel[mKey] = pm;
+    const ts = doc.mtimeMs || doc.createdAt || 0;
+    if (ts > 0) {
+      const d = new Date(ts);
+      const dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      addDaily(dk, tok, inp, cache, out, Math.max(1, doc.turns || 1));
+    }
+  }
+
+  // 2. Scan registered DSH sessions (cached incrementally by dsh_reader)
+  for (const [sid, meta] of Object.entries(registry.sessions)) {
+    if (seenSids.has(sid)) continue;
+    const fp = findSessionFileById(sid);
+    if (!fp) continue;
+    const parsed = parseDshSessionFile(fp, { maxItems: 1 });
+    const tok = parsed?.cumulativeTokens || parsed?.usage?.totalTokens || 0;
+    if (tok <= 0) continue;
+    scanSessions++;
+    const inp = parsed.cumulativeInputTokens || parsed.usage?.inputTokens || 0;
+    const cache = parsed.cumulativeCacheReadTokens || parsed.usage?.cacheReadTokens || 0;
+    const out = parsed.cumulativeOutputTokens || parsed.usage?.outputTokens || 0;
+    const drv = meta.driver || "dsh";
+    const mdl = meta.model || profSnap.defaultSelection?.model || "deepseek-v4.1-flash";
+    const mKey = mdl.includes("/") ? `${drv}/${mdl.split("/").slice(1).join("/")}` : `${drv}/${mdl}`;
+    scanTokens += tok;
+    scanInput += inp;
+    scanCache += cache;
+    scanOutput += out;
+    scanByDriver[drv] = (scanByDriver[drv] || 0) + tok;
+    const pm = scanByModel[mKey] || { tokens: 0, runs: 0, lastTps: 0 };
+    pm.tokens += tok;
+    pm.runs += Math.max(1, parsed.stats?.turns || 1);
+    if (parsed.lastTps > 0) pm.lastTps = parsed.lastTps;
+    scanByModel[mKey] = pm;
+
+    const dMap = parsed.dailyUsage || {};
+    const dKeys = Object.keys(dMap);
+    if (dKeys.length > 0) {
+      for (const dk of dKeys) {
+        const rec = dMap[dk];
+        addDaily(dk, rec.tokens, rec.inputTokens, rec.cacheReadTokens, rec.outputTokens, Math.max(1, rec.steps || 1));
+      }
+    } else if (parsed.mtimeMs || parsed.createdAt) {
+      const d = new Date(parsed.mtimeMs || parsed.createdAt);
+      const dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      addDaily(dk, tok, inp, cache, out, Math.max(1, parsed.stats?.turns || 1));
+    }
+  }
+
+  // Merge scanned historical totals with live profileStore telemetry without double-counting
+  const mergedDaily = { ...(base.daily || {}) };
+  for (const [dk, rec] of Object.entries(scanDaily)) {
+    const b = mergedDaily[dk];
+    if (!b || rec.tokens > (b.tokens || 0)) {
+      mergedDaily[dk] = {
+        tokens: Math.max(rec.tokens, b?.tokens || 0),
+        inputTokens: Math.max(rec.inputTokens, b?.inputTokens || 0),
+        cacheReadTokens: Math.max(rec.cacheReadTokens, b?.cacheReadTokens || 0),
+        outputTokens: Math.max(rec.outputTokens, b?.outputTokens || 0),
+        runs: Math.max(rec.runs, b?.runs || 0),
+      };
+    }
+  }
+
+  const mergedByDriver = { ...(base.byDriver || {}) };
+  for (const [k, v] of Object.entries(scanByDriver)) {
+    mergedByDriver[k] = Math.max(v, mergedByDriver[k] || 0);
+  }
+
+  const mergedByModel = { ...(base.byModel || {}) };
+  for (const [k, v] of Object.entries(scanByModel)) {
+    const b = mergedByModel[k];
+    mergedByModel[k] = {
+      tokens: Math.max(v.tokens, b?.tokens || 0),
+      runs: Math.max(v.runs, b?.runs || 0),
+      lastTps: b?.lastTps || v.lastTps || 0,
+    };
+  }
+
+  unifiedTelemetryCache = {
+    ...base,
+    allTimeTokens: Math.max(base.allTimeTokens || 0, scanTokens),
+    allTimeInputTokens: Math.max(base.allTimeInputTokens || 0, scanInput),
+    allTimeCacheReadTokens: Math.max(base.allTimeCacheReadTokens || 0, scanCache),
+    allTimeOutputTokens: Math.max(base.allTimeOutputTokens || 0, scanOutput),
+    totalRuns: Math.max(base.totalRuns || 0, scanSessions),
+    totalSessions: scanSessions,
+    byDriver: mergedByDriver,
+    byModel: mergedByModel,
+    daily: mergedDaily,
+  };
+  unifiedTelemetryAt = now;
+  unifiedTelemetryVer = verKey;
+  return unifiedTelemetryCache;
+}
+
 function buildStateSnapshot({
   sessionId,
   scopeCwd = "",
@@ -1402,7 +1568,7 @@ function buildStateSnapshot({
       selectedSessionId: selectedId,
       activeRun,
       activeRuns,
-      telemetry: profSnap.telemetry,
+      telemetry: getUnifiedTelemetry(profSnap),
       serverTime: Date.now(),
     };
   }
@@ -1450,7 +1616,7 @@ function buildStateSnapshot({
     defaultSelection: profSnap.defaultSelection,
     settings: profSnap.settings,
     customProfiles: profSnap.customProfiles,
-    telemetry: profSnap.telemetry,
+    telemetry: getUnifiedTelemetry(profSnap),
     sessions,
     activeRun,
     activeRuns,
@@ -1463,7 +1629,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.1.0",
+  version: "3.2.0",
 });
 
 registerAppResource(

@@ -260,6 +260,8 @@ function createParserState(filePath) {
     cumulativeInputTokens: 0,
     cumulativeCacheReadTokens: 0,
     cumulativeOutputTokens: 0,
+    recentSteps: [],
+    dailyUsage: {},
     allItems: [],
     toolItemByCallId: new Map(),
     lineRemainder: "",
@@ -347,12 +349,46 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
       state.cumulativeInputTokens += inputTokens;
       state.cumulativeCacheReadTokens += cacheReadTokens;
       state.cumulativeOutputTokens += outputTokens;
+      let stepDur = 0;
+      let stepTps = 0;
       if (time && state.stepStartTime && time > state.stepStartTime && outputTokens > 0) {
         const durSec = (time - state.stepStartTime) / 1000;
-        state.lastStepDurationSec = Math.round(durSec * 10) / 10;
+        stepDur = Math.round(durSec * 10) / 10;
+        state.lastStepDurationSec = stepDur;
         if (durSec >= 0.15) {
-          state.lastTps = Math.round(((outputTokens + reasoningTokens) / durSec) * 10) / 10;
+          stepTps = Math.round(((outputTokens + reasoningTokens) / durSec) * 10) / 10;
+          state.lastTps = stepTps;
         }
+      }
+      state.recentSteps.push({
+        time: time || state.createdAt || 0,
+        turn: state.currentTurn,
+        step: state.currentStep,
+        inputTokens,
+        cacheReadTokens,
+        outputTokens: outputTokens + reasoningTokens,
+        totalTokens,
+        durationSec: stepDur,
+        tps: stepTps,
+      });
+      if (state.recentSteps.length > 15) state.recentSteps.shift();
+      const tsForDay = time || state.createdAt || 0;
+      if (tsForDay > 0 && totalTokens > 0) {
+        const dt = new Date(tsForDay);
+        const dayKey = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+        const prevD = state.dailyUsage[dayKey] || {
+          tokens: 0,
+          inputTokens: 0,
+          cacheReadTokens: 0,
+          outputTokens: 0,
+          steps: 0,
+        };
+        prevD.tokens += totalTokens;
+        prevD.inputTokens += inputTokens;
+        prevD.cacheReadTokens += cacheReadTokens;
+        prevD.outputTokens += outputTokens + reasoningTokens;
+        prevD.steps += 1;
+        state.dailyUsage[dayKey] = prevD;
       }
     }
 
@@ -626,6 +662,8 @@ export function parseSessionFile(filePath, opts = {}) {
     cumulativeInputTokens: st.cumulativeInputTokens,
     cumulativeCacheReadTokens: st.cumulativeCacheReadTokens,
     cumulativeOutputTokens: st.cumulativeOutputTokens,
+    recentSteps: st.recentSteps.slice().reverse(),
+    dailyUsage: st.dailyUsage,
     stats: {
       totalEvents: st.totalEvents,
       turns: st.currentTurn,

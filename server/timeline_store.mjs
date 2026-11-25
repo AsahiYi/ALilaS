@@ -75,6 +75,7 @@ export function createTimelineStore(dataDir) {
         cumulativeInputTokens: 0,
         cumulativeCacheReadTokens: 0,
         cumulativeOutputTokens: 0,
+        recentSteps: [],
         lastAssistantText: "",
         items: [],
       };
@@ -137,6 +138,7 @@ export function createTimelineStore(dataDir) {
       cumulativeInputTokens: doc.cumulativeInputTokens || 0,
       cumulativeCacheReadTokens: doc.cumulativeCacheReadTokens || 0,
       cumulativeOutputTokens: doc.cumulativeOutputTokens || 0,
+      recentSteps: Array.isArray(doc.recentSteps) ? doc.recentSteps : [],
       stats: {
         totalEvents: allItems.length,
         turns: doc.turns || 0,
