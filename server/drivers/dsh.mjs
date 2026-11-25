@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -27,61 +28,241 @@ export function resolveCommand() {
 export function resolveBasePatch(pluginRoot) {
   const fromEnv = (process.env.ALILAS_PATCH_FILE || process.env.LILAS_PATCH_FILE || "").trim();
   if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  if (!pluginRoot) return "";
   const local = path.join(pluginRoot, "config", "mode_a_patch.yml");
   return fs.existsSync(local) ? local : "";
 }
 
-/**
- * Lightweight parser to surface models declared in user's config/mode_a_patch.yml (no external yaml dep).
- */
-export function readPatchModels(pluginRoot) {
-  const fp = resolveBasePatch(pluginRoot);
-  if (!fp) return [];
-  try {
-    const text = fs.readFileSync(fp, "utf8");
-    const provMatch = text.match(/^\s*provider:\s*([^\s#]+)/m);
-    const defaultProvider = provMatch ? provMatch[1].replace(/^['"]|['"]$/g, "") : "default";
-    const models = [];
-    const seen = new Set();
-    // Match `models:` items with `- id: ...`
-    const re = /-\s+id:\s*([^\s#\r\n]+)[\s\S]{0,220}?(?:name:\s*([^\r\n#]+))?/g;
-    const modelsBlockIdx = text.indexOf("models:");
-    if (modelsBlockIdx !== -1) {
-      const sub = text.slice(modelsBlockIdx);
-      let m;
-      while ((m = re.exec(sub)) !== null) {
-        const modelId = m[1].replace(/^['"]|['"]$/g, "").trim();
-        if (!modelId || seen.has(modelId)) continue;
-        seen.add(modelId);
-        const name = m[2] ? m[2].replace(/^['"]|['"]$/g, "").trim() : modelId;
-        const cwMatch = sub.slice(m.index, m.index + 320).match(/contextWindow:\s*(\d+)/);
-        models.push({
-          id: modelId,
-          name,
-          provider: defaultProvider,
-          contextWindow: cwMatch ? Number(cwMatch[1]) : inferContextWindow(modelId, 1_000_000),
-        });
-      }
-    }
-    if (models.length === 0) {
-      const modMatch = text.match(/^\s*model:\s*([^\s#]+)/m);
-      if (modMatch) {
-        const modelId = modMatch[1].replace(/^['"]|['"]$/g, "").trim();
-        models.push({
-          id: modelId,
-          name: modelId,
-          provider: defaultProvider,
-          contextWindow: inferContextWindow(modelId, 1_000_000),
-        });
-      }
-    }
-    return models;
-  } catch {
-    return [];
-  }
+export function resolveDesktopPatch() {
+  const dshHome = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
+  const fp = path.join(dshHome, "profiles", "desktop", "cordis.patch.yml");
+  return fs.existsSync(fp) ? fp : "";
 }
 
-export function detect({ pluginRoot } = {}) {
+function unquoteYaml(val) {
+  const s = String(val || "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+function stripInlineComment(line) {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+/**
+ * Zero-dependency indentation-aware parser for DSH `llm-pi-ai` `providers:` blocks.
+ * Strictly reads provider metadata (`apiKeyEnv` name only, never secret values).
+ */
+export function parseProvidersFromYaml(text) {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  const providers = [];
+
+  let inLlm = false;
+  let inProviders = false;
+  let providersIndent = -1;
+  let curProv = null;
+  let provIndent = -1;
+  let inModels = false;
+  let modelsIndent = -1;
+  let curModel = null;
+  let inEfforts = false;
+  let effortsIndent = -1;
+
+  for (const rawLine of lines) {
+    const clean = stripInlineComment(rawLine).replace(/\s+$/, "");
+    if (!clean.trim()) continue;
+    const indent = clean.match(/^(\s*)/)[1].length;
+    const trimmed = clean.trim();
+
+    // Detect top-level YAML list entry (`- id: ...`)
+    if (indent === 0 && trimmed.startsWith("- ")) {
+      inLlm = /^-+\s*id:\s*['"]?llm-pi-ai['"]?\s*$/.test(trimmed);
+      inProviders = false;
+      curProv = null;
+      inModels = false;
+      curModel = null;
+      inEfforts = false;
+      continue;
+    }
+
+    if (!inLlm) continue;
+
+    if (!inProviders) {
+      if (trimmed === "providers:") {
+        inProviders = true;
+        providersIndent = indent;
+      }
+      continue;
+    }
+
+    if (indent <= providersIndent) {
+      inProviders = false;
+      curProv = null;
+      inModels = false;
+      curModel = null;
+      inEfforts = false;
+      continue;
+    }
+
+    // Provider key line (direct child of `providers:`)
+    if (curProv === null || indent === provIndent) {
+      const m = trimmed.match(/^([A-Za-z0-9_.-]+):\s*$/);
+      if (m) {
+        provIndent = indent;
+        curProv = {
+          key: m[1],
+          displayName: m[1],
+          apiKeyEnv: "",
+          api: "openai-responses",
+          baseURL: "",
+          models: [],
+        };
+        providers.push(curProv);
+        inModels = false;
+        curModel = null;
+        inEfforts = false;
+        continue;
+      }
+    }
+
+    if (!curProv) continue;
+
+    // Inside a provider
+    if (inEfforts && indent <= effortsIndent) {
+      inEfforts = false;
+    }
+    if (inModels && indent <= modelsIndent) {
+      inModels = false;
+      curModel = null;
+    }
+
+    if (!inModels) {
+      const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (kv) {
+        const [, k, v] = kv;
+        if (k === "models") {
+          inModels = true;
+          modelsIndent = indent;
+          curModel = null;
+        } else if (k === "displayName") curProv.displayName = unquoteYaml(v) || curProv.key;
+        else if (k === "apiKeyEnv") curProv.apiKeyEnv = unquoteYaml(v);
+        else if (k === "api") curProv.api = unquoteYaml(v);
+        else if (k === "baseURL") curProv.baseURL = unquoteYaml(v);
+      }
+      continue;
+    }
+
+    // Inside `models:`
+    if (trimmed.startsWith("- ")) {
+      inEfforts = false;
+      const m = trimmed.match(/^-\s+id:\s*(.+)$/);
+      if (m) {
+        const modelId = unquoteYaml(m[1]);
+        curModel = {
+          id: modelId,
+          name: modelId,
+          provider: curProv.key,
+          providerLabel: curProv.displayName || curProv.key,
+          contextWindow: inferContextWindow(modelId, 200_000),
+          maxTokens: 64_000,
+          efforts: ["low", "medium", "high"],
+        };
+        curProv.models.push(curModel);
+      }
+      continue;
+    }
+
+    if (!curModel) continue;
+
+    if (inEfforts) {
+      const ekv = trimmed.match(/^(off|low|medium|high|xhigh):\s*(.*)$/i);
+      if (ekv) {
+        const ek = ekv[1].toLowerCase();
+        if (ek !== "off" && !curModel._parsedEfforts.includes(ek)) {
+          curModel._parsedEfforts.push(ek);
+        }
+      }
+      continue;
+    }
+
+    const mkv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (mkv) {
+      const [, k, v] = mkv;
+      if (k === "name" && v) curModel.name = unquoteYaml(v);
+      else if (k === "contextWindow" && v) curModel.contextWindow = Number(v) || curModel.contextWindow;
+      else if (k === "maxTokens" && v) curModel.maxTokens = Number(v) || curModel.maxTokens;
+      else if (k === "reasoningEfforts") {
+        inEfforts = true;
+        effortsIndent = indent;
+        curModel._parsedEfforts = [];
+      }
+    }
+  }
+
+  for (const p of providers) {
+    for (const m of p.models) {
+      m.providerLabel = p.displayName || p.key;
+      if (Array.isArray(m._parsedEfforts) && m._parsedEfforts.length > 0) {
+        m.efforts = m._parsedEfforts;
+      }
+      delete m._parsedEfforts;
+    }
+  }
+  return providers.filter((p) => p.models.length > 0);
+}
+
+/**
+ * Collect all DSH providers & models from plugin `mode_a_patch.yml` and (optionally)
+ * DSH desktop `cordis.patch.yml` (read-only). Plugin patch takes priority on duplicate provider keys.
+ */
+export function discoverProviders({ pluginRoot, scanDesktop = true } = {}) {
+  const byKey = new Map();
+
+  const mergeFile = (fp, source) => {
+    if (!fp || !fs.existsSync(fp)) return;
+    try {
+      const parsed = parseProvidersFromYaml(fs.readFileSync(fp, "utf8"));
+      for (const p of parsed) {
+        if (!byKey.has(p.key)) {
+          byKey.set(p.key, { ...p, source });
+        } else {
+          // Merge any missing models from desktop into existing provider
+          const existing = byKey.get(p.key);
+          const seenIds = new Set(existing.models.map((m) => m.id));
+          for (const m of p.models) {
+            if (!seenIds.has(m.id)) {
+              existing.models.push({ ...m, providerLabel: existing.displayName });
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore unreadable yaml
+    }
+  };
+
+  mergeFile(resolveBasePatch(pluginRoot), "plugin");
+  if (scanDesktop) {
+    mergeFile(resolveDesktopPatch(), "desktop");
+  }
+
+  return Array.from(byKey.values());
+}
+
+export function detect({ pluginRoot, scanDesktop = true } = {}) {
   const spec = resolveCommand();
   if (!spec) {
     return {
@@ -90,16 +271,29 @@ export function detect({ pluginRoot } = {}) {
       installed: false,
       command: null,
       detail: "dsh not found on PATH (set ALILAS_DSH_BIN to override)",
+      providers: [],
       models: [],
     };
   }
-  const models = pluginRoot ? readPatchModels(pluginRoot) : [];
+  const providers = discoverProviders({ pluginRoot, scanDesktop });
+  const models = [];
+  for (const p of providers) {
+    for (const m of p.models) {
+      models.push({
+        ...m,
+        compositeId: `${p.key}/${m.id}`,
+      });
+    }
+  }
   return {
     id,
     label,
     installed: true,
     command: spec.display,
-    detail: models.length ? `${models.length} configured DSH model(s)` : "Ready (Mode A headless)",
+    detail: providers.length
+      ? `${providers.length} 上游 · ${models.length} 模型`
+      : "Ready (Mode A headless)",
+    providers,
     models,
   };
 }
@@ -122,14 +316,57 @@ function ensureStreamProbePatch(dataDir, pluginRoot) {
 }
 
 /**
- * Per-run temporary YAML patch overlay so concurrent sessions can freely run different models
- * or custom OpenAI-compatible upstream endpoints with ZERO conflict on shared config files.
+ * Resolve composite DSH model reference (`providerKey/modelId` or bare `modelId`)
+ * against discovered providers so selecting ANY desktop upstream model works seamlessly in Mode A.
  */
-function writePerRunModelPatch({ dataDir, runId, model, effort, profile }) {
-  if (!model && !effort && !profile) return "";
+function resolveDiscoveredModel({ pluginRoot, model, provider }) {
+  if (!model) return null;
+  const providers = discoverProviders({ pluginRoot, scanDesktop: true });
+
+  // Support `providerKey::modelId` or `providerKey/modelId` ONLY when prefix matches a known provider key
+  let reqProv = provider || "";
+  let reqModel = model;
+  if (!reqProv && model.includes("/")) {
+    const firstSlash = model.indexOf("/");
+    const candidateProv = model.slice(0, firstSlash);
+    if (providers.some((p) => p.key === candidateProv)) {
+      reqProv = candidateProv;
+      reqModel = model.slice(firstSlash + 1);
+    }
+  }
+
+  for (const p of providers) {
+    if (reqProv && p.key !== reqProv) continue;
+    const found = p.models.find((m) => m.id === reqModel);
+    if (found) {
+      return {
+        provider: p.key,
+        name: found.name || found.id,
+        apiKeyEnv: p.apiKeyEnv,
+        api: p.api || "openai-responses",
+        baseURL: p.baseURL,
+        model: found.id,
+        contextWindow: found.contextWindow || 200_000,
+        maxTokens: found.maxTokens || 64_000,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Per-run temporary YAML patch overlay so concurrent sessions can freely run different models
+ * or any discovered DSH desktop upstream with ZERO conflict on shared config files.
+ */
+function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, profile }) {
+  const resolved = profile?.baseURL
+    ? profile
+    : resolveDiscoveredModel({ pluginRoot, model, provider: profile?.provider });
+
+  if (!model && !effort && !resolved) return "";
   const entries = [];
 
-  if (profile?.baseURL && profile?.provider && profile?.model) {
+  if (resolved?.baseURL && resolved?.provider && resolved?.model) {
     entries.push(
       `- id: credentials\n  disabled: false`,
       `- id: tool-result-pruner\n  disabled: true`,
@@ -138,16 +375,16 @@ function writePerRunModelPatch({ dataDir, runId, model, effort, profile }) {
         `  name: "@deepseek-ai/dsh-llm-pi-ai"`,
         `  config:`,
         `    providers:`,
-        `      ${profile.provider}:`,
-        `        apiKeyEnv: ${profile.apiKeyEnv || "OPENAI_API_KEY"}`,
-        `        api: ${profile.api || "openai-responses"}`,
-        `        baseURL: ${JSON.stringify(profile.baseURL)}`,
-        `        displayName: ${JSON.stringify(profile.name || profile.provider)}`,
+        `      ${resolved.provider}:`,
+        ...(resolved.apiKeyEnv ? [`        apiKeyEnv: ${resolved.apiKeyEnv}`] : []),
+        `        api: ${resolved.api || "openai-responses"}`,
+        `        baseURL: ${JSON.stringify(resolved.baseURL)}`,
+        `        displayName: ${JSON.stringify(resolved.name || resolved.provider)}`,
         `        models:`,
-        `          - id: ${JSON.stringify(profile.model)}`,
-        `            name: ${JSON.stringify(profile.name || profile.model)}`,
-        `            contextWindow: ${Number(profile.contextWindow) || 200000}`,
-        `            maxTokens: ${Number(profile.maxTokens) || 64000}`,
+        `          - id: ${JSON.stringify(resolved.model)}`,
+        `            name: ${JSON.stringify(resolved.name || resolved.model)}`,
+        `            contextWindow: ${Number(resolved.contextWindow) || 200_000}`,
+        `            maxTokens: ${Number(resolved.maxTokens) || 64_000}`,
         `            input:`,
         `              - text`,
         `              - image`,
@@ -160,8 +397,8 @@ function writePerRunModelPatch({ dataDir, runId, model, effort, profile }) {
     );
   }
 
-  const targetProvider = profile?.provider || undefined;
-  const targetModel = profile?.model || model || undefined;
+  const targetProvider = resolved?.provider || profile?.provider || undefined;
+  const targetModel = resolved?.model || profile?.model || model || undefined;
   const targetEffort = effort || profile?.effort || undefined;
 
   if (targetModel || targetProvider || targetEffort) {
@@ -172,8 +409,8 @@ function writePerRunModelPatch({ dataDir, runId, model, effort, profile }) {
     ];
     if (targetProvider) cfgLines.push(`    provider: ${JSON.stringify(targetProvider)}`);
     if (targetModel) cfgLines.push(`    model: ${JSON.stringify(targetModel)}`);
-    if (targetEffort && ["low", "medium", "high"].includes(targetEffort)) {
-      cfgLines.push(`    reasoningEffort: ${targetEffort}`);
+    if (targetEffort && ["off", "low", "medium", "high"].includes(targetEffort)) {
+      cfgLines.push(`    reasoningEffort: ${targetEffort === "off" ? "null" : targetEffort}`);
     }
     entries.push(cfgLines.join("\n"));
   }
@@ -208,7 +445,7 @@ export function buildInvocation({
   const basePatch = resolveBasePatch(pluginRoot);
   if (basePatch) args.push("--patch", basePatch);
 
-  const perRunPatch = writePerRunModelPatch({ dataDir, runId, model, effort, profile });
+  const perRunPatch = writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, profile });
   if (perRunPatch) {
     args.push("--patch", perRunPatch);
     cleanupPaths.push(perRunPatch);
@@ -343,7 +580,7 @@ export function createParser(emit) {
             if (usage) emit({ type: "usage", usage, durationSec: durSec });
           }
         } catch {
-          // ignore malformed probe line
+          // ignore
         }
       } else if (rawLine.trim()) {
         emit({ type: "stderr", text: rawLine });

@@ -187,10 +187,29 @@ test("profileStore & timelineStore persist custom profiles, telemetry, and timel
       contextWindow: 1_000_000,
     });
     assert.equal(prof.apiKeyEnv, "MY_RELAY_KEY");
-    ps.recordUsageDelta({ driver: "agy", totalTokens: 50000, outputTokens: 1200, tps: 118.4, incrementRun: true });
+    ps.recordUsageDelta({
+      driver: "agy",
+      model: "gemini-4-neon-high",
+      effort: "high",
+      inputTokens: 8000,
+      cacheReadTokens: 40800,
+      outputTokens: 1200,
+      totalTokens: 50000,
+      tps: 118.4,
+      ttftSec: 1.42,
+      durationSec: 10.1,
+      incrementRun: true,
+    });
+    ps.updateSettings({ idleTimeoutSec: 240, scanDshDesktop: false });
     const snap = ps.getSnapshot();
     assert.equal(snap.telemetry.allTimeTokens, 50000);
+    assert.equal(snap.telemetry.allTimeCacheReadTokens, 40800);
     assert.equal(snap.telemetry.lastTps, 118.4);
+    assert.equal(snap.telemetry.lastTtftSec, 1.42);
+    assert.equal(snap.telemetry.recentCalls.length, 1);
+    assert.equal(Object.keys(snap.telemetry.daily).length, 1);
+    assert.equal(snap.settings.idleTimeoutSec, 240);
+    assert.equal(snap.settings.scanDshDesktop, false);
 
     const ts = createTimelineStore(tmp);
     const doc = ts.ensure({ sessionId: "conv-abc", driver: "agy", model: "gemini-4-neon-high", cwd: tmp });
@@ -201,4 +220,48 @@ test("profileStore & timelineStore persist custom profiles, telemetry, and timel
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("dsh parseProvidersFromYaml extracts multi-provider models, efforts, and apiKeyEnv cleanly", () => {
+  const sampleYaml = `
+- id: other-service
+  config:
+    enabled: true
+- id: llm-pi-ai
+  config:
+    providers:
+      relay-a:
+        displayName: "Relay Alpha"
+        apiKeyEnv: RELAY_A_KEY
+        api: openai-responses
+        baseURL: https://relay-a.example.com/v1
+        models:
+          - id: cn:deepseek-v4.1-flash
+            name: DeepSeek-V4.1-Flash
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              low: {}
+              medium: {}
+              high: {}
+      claude-b:
+        apiKeyEnv: CLAUDE_B_KEY
+        api: anthropic-messages
+        baseURL: https://claude-b.example.com
+        models:
+          - id: claude-sonnet-4-6
+            name: "Claude Sonnet 4.6"
+            contextWindow: 200000
+`;
+  const providers = dsh.parseProvidersFromYaml(sampleYaml);
+  assert.equal(providers.length, 2);
+  assert.equal(providers[0].key, "relay-a");
+  assert.equal(providers[0].displayName, "Relay Alpha");
+  assert.equal(providers[0].apiKeyEnv, "RELAY_A_KEY");
+  assert.equal(providers[0].models[0].id, "cn:deepseek-v4.1-flash");
+  assert.equal(providers[0].models[0].contextWindow, 1000000);
+  assert.deepEqual(providers[0].models[0].efforts, ["low", "medium", "high"]);
+  assert.equal(providers[1].key, "claude-b");
+  assert.equal(providers[1].api, "anthropic-messages");
+  assert.equal(providers[1].models[0].name, "Claude Sonnet 4.6");
 });

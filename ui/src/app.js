@@ -6,7 +6,25 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.0.0" }, {});
+const app = new App({ name: "alilas", version: "3.1.0" }, {});
+
+const EFFORT_LABELS = {
+  off: "关",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "超高",
+  max: "满档",
+};
+
+const EFFORT_ORDER = {
+  off: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  xhigh: 4,
+  max: 5,
+};
 
 const state = {
   selectedSessionId: null,
@@ -20,8 +38,24 @@ const state = {
   drivers: [],
   customProfiles: [],
   defaultSelection: { driver: "", model: "", effort: "high", profileId: "" },
-  telemetry: { allTimeTokens: 0, allTimeOutputTokens: 0, totalRuns: 0, lastTps: 0 },
-  selectedModelKey: "", // format: "profile:<id>" or "<driver>::<model>"
+  settings: { idleTimeoutSec: 180, scanDshDesktop: true },
+  telemetry: {
+    allTimeTokens: 0,
+    allTimeInputTokens: 0,
+    allTimeCacheReadTokens: 0,
+    allTimeOutputTokens: 0,
+    totalRuns: 0,
+    lastTps: 0,
+    lastTtftSec: 0,
+    lastDurationSec: 0,
+    firstUsedAt: null,
+    byDriver: {},
+    byModel: {},
+    daily: {},
+    recentCalls: [],
+  },
+  // Current per-run selection in composer
+  selection: { driver: "", model: "", effort: "high", profileId: "" },
   userTouchedModel: false,
   permissionMode: "auto", // "auto" | "readonly"
   activeRun: null,
@@ -30,12 +64,21 @@ const state = {
   expandAllReasoning: false,
   showTools: true,
   showManageBar: false,
-  showCustomModal: false,
+  // Model popover UI state
+  popoverOpen: false,
+  popoverTab: "dsh",
+  popoverSearch: "",
+  expandedProviders: new Set(),
+  expandedProvidersSeeded: false,
+  expandedModelRow: "",
+  // Inspector drawer UI state
+  inspectorOpen: false,
+  inspectorTab: "session", // "session" | "usage" | "settings"
+  // Timeline incremental rendering
   openDetails: new Set(),
   closedDetails: new Set(),
   lastEtag: "",
   lastSessionsSig: "",
-  lastModelsSig: "",
   lastRenderedSessionId: null,
   renderedCardSigs: new Map(),
   pollTimer: null,
@@ -76,6 +119,18 @@ function formatTokens(n) {
   return String(n);
 }
 
+function formatComma(n) {
+  return Number(n || 0).toLocaleString("en-US");
+}
+
+function localDateKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function shortProjectName(cwd, slug) {
   if (cwd) {
     const parts = cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
@@ -87,6 +142,12 @@ function shortProjectName(cwd, slug) {
 function shortDriverTag(driver) {
   const map = { agy: "AGY", dsh: "DSH", claude: "Claude", codex: "Codex" };
   return map[driver] || driver || "AGY";
+}
+
+function effortLabel(effort) {
+  if (!effort) return "";
+  const lower = String(effort).toLowerCase();
+  return EFFORT_LABELS[lower] || effort;
 }
 
 function isRunningStatus(run) {
@@ -171,20 +232,190 @@ async function attachContextToHost(title, body) {
   }
 }
 
-function parseModelKey(key) {
-  if (!key) return { driver: undefined, model: undefined, profileId: undefined };
-  if (key.startsWith("profile:")) {
-    const pid = key.slice(8);
-    const p = state.customProfiles.find((x) => x.id === pid);
-    return { driver: p?.driver, model: p?.model, profileId: pid };
+// ---------------------------------------------------------------- Model Catalog & Grouping
+
+function getDriverInfo(driverId) {
+  return state.drivers.find((d) => d.id === driverId) || null;
+}
+
+/**
+ * Group AGY native models like "Gemini 4 Neon (High)" / "Gemini 4 Neon (XHigh)"
+ * into clean base-model rows with inline Thinking Effort variants.
+ */
+function groupAgyModels(models) {
+  const byBase = new Map();
+  for (const m of models || []) {
+    const rawName = m.name || m.id;
+    const match = rawName.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    let baseName = rawName;
+    let variantRaw = "";
+    if (match) {
+      baseName = match[1].trim();
+      variantRaw = match[2].trim();
+    } else {
+      const idMatch = m.id.match(/^(.+?)-(low|medium|high|xhigh|max)$/i);
+      if (idMatch) {
+        baseName = rawName;
+        variantRaw = idMatch[2];
+      }
+    }
+    const lowerVar = variantRaw.toLowerCase();
+    const isStdEffort = Object.prototype.hasOwnProperty.call(EFFORT_LABELS, lowerVar);
+    const variantLabel = isStdEffort ? EFFORT_LABELS[lowerVar] : variantRaw || "默认";
+    const effortKey = isStdEffort ? lowerVar : "high";
+
+    if (!byBase.has(baseName)) {
+      byBase.set(baseName, {
+        baseName,
+        contextWindow: m.contextWindow || 1_000_000,
+        variants: [],
+      });
+    }
+    byBase.get(baseName).variants.push({
+      modelId: m.id,
+      rawName,
+      variantLabel,
+      effortKey,
+      order: isStdEffort ? EFFORT_ORDER[lowerVar] : 99,
+      contextWindow: m.contextWindow || 1_000_000,
+    });
   }
-  const sep = key.indexOf("::");
-  if (sep === -1) return { driver: undefined, model: undefined, profileId: undefined };
-  return {
-    driver: key.slice(0, sep),
-    model: key.slice(sep + 2) || undefined,
-    profileId: "",
-  };
+  const groups = Array.from(byBase.values());
+  for (const g of groups) {
+    g.variants.sort((a, b) => a.order - b.order);
+  }
+  return groups;
+}
+
+function getSelectionDisplay(sel = state.selection) {
+  if (sel.profileId) {
+    const p = state.customProfiles.find((x) => x.id === sel.profileId);
+    if (p) {
+      return {
+        name: p.name || p.model,
+        effort: effortLabel(sel.effort || p.effort),
+        driver: p.driver,
+      };
+    }
+  }
+  const drv = sel.driver || state.defaultSelection.driver || "";
+  const mdl = sel.model || "";
+  const dInfo = getDriverInfo(drv);
+
+  if (drv === "agy" && dInfo?.models?.length) {
+    const found = dInfo.models.find((m) => m.id === mdl);
+    if (found) {
+      const match = (found.name || found.id).match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+      if (match) {
+        return {
+          name: match[1].trim(),
+          effort: effortLabel(match[2].trim()),
+          driver: "agy",
+        };
+      }
+      return { name: found.name || found.id, effort: effortLabel(sel.effort), driver: "agy" };
+    }
+  }
+
+  if (drv === "dsh" && dInfo?.models?.length) {
+    const found = dInfo.models.find((m) => m.compositeId === mdl || m.id === mdl);
+    if (found) {
+      return {
+        name: found.name || found.id,
+        effort: effortLabel(sel.effort),
+        driver: "dsh",
+        provider: found.providerLabel || found.provider,
+      };
+    }
+  }
+
+  if (dInfo?.models?.length && mdl) {
+    const found = dInfo.models.find((m) => m.id === mdl);
+    if (found) {
+      return { name: found.name || found.id, effort: effortLabel(sel.effort), driver: drv };
+    }
+  }
+
+  if (mdl) {
+    const clean = mdl.includes("/") ? mdl.split("/").slice(1).join("/") : mdl;
+    return { name: clean, effort: effortLabel(sel.effort), driver: drv };
+  }
+  return { name: dInfo ? `${shortDriverTag(drv)} 默认` : "自动模型", effort: "", driver: drv };
+}
+
+function syncInitialSelection() {
+  if (state.userTouchedModel) return;
+  const def = state.defaultSelection || {};
+  let next = null;
+
+  if (def.profileId && state.customProfiles.some((p) => p.id === def.profileId)) {
+    const p = state.customProfiles.find((x) => x.id === def.profileId);
+    next = { driver: p.driver, model: p.model, effort: def.effort || p.effort || "high", profileId: p.id };
+  } else if (def.driver) {
+    const dInfo = getDriverInfo(def.driver);
+    if (dInfo?.installed) {
+      let model = def.model || "";
+      if (model && def.driver === "dsh" && !model.includes("/")) {
+        const matched = (dInfo.models || []).find((m) => m.id === model);
+        if (matched?.compositeId) model = matched.compositeId;
+      }
+      if (!model && dInfo.models?.length) {
+        model = dInfo.models[0].compositeId || dInfo.models[0].id;
+      }
+      next = { driver: def.driver, model, effort: def.effort || "high", profileId: "" };
+    }
+  }
+
+  if (!next && state.session?.driver) {
+    const dInfo = getDriverInfo(state.session.driver);
+    if (dInfo?.installed) {
+      let model = state.session.model || "";
+      if (!model && dInfo.models?.length) model = dInfo.models[0].compositeId || dInfo.models[0].id;
+      next = {
+        driver: state.session.driver,
+        model,
+        effort: state.session.effort || "high",
+        profileId: "",
+      };
+    }
+  }
+
+  if (!next) {
+    const dshInfo = state.drivers.find((d) => d.id === "dsh" && d.installed && d.models?.length > 0);
+    const agyInfo = state.drivers.find((d) => d.id === "agy" && d.installed);
+    const first = dshInfo || agyInfo || state.drivers.find((d) => d.installed);
+    if (first) {
+      const m0 = first.models?.[0];
+      next = {
+        driver: first.id,
+        model: m0 ? m0.compositeId || m0.id : "",
+        effort: "high",
+        profileId: "",
+      };
+    }
+  }
+
+  if (next) {
+    state.selection = next;
+    // Seed DSH expanded provider once so active provider opens automatically while others stay collapsed
+    if (!state.expandedProvidersSeeded && next.driver === "dsh") {
+      const provKey = next.model?.includes("/") ? next.model.split("/")[0] : "";
+      if (provKey) {
+        state.expandedProviders.add(provKey);
+        state.expandedProvidersSeeded = true;
+      }
+    }
+  }
+}
+
+function isDefaultMatch(driver, model, effort, profileId = "") {
+  const def = state.defaultSelection || {};
+  if (profileId) return def.profileId === profileId;
+  if (def.profileId) return false;
+  if (def.driver !== driver) return false;
+  if (def.model !== model) return false;
+  if (driver === "agy") return true; // effort encoded in agy modelId
+  return (def.effort || "high") === (effort || "high");
 }
 
 // ---------------------------------------------------------------- Header & Telemetry Bar
@@ -291,7 +522,9 @@ function renderAgentChips() {
     .map((r, idx) => {
       const isSel = r.sessionId && r.sessionId === state.selectedSessionId;
       const proj = shortProjectName(r.cwd, "") || `分身${idx + 1}`;
-      const label = state.allProjects ? `${shortDriverTag(r.driver)}·${proj}` : `${shortDriverTag(r.driver)} #${idx + 1}`;
+      const label = state.allProjects
+        ? `${shortDriverTag(r.driver)}·${proj}`
+        : `${shortDriverTag(r.driver)} #${idx + 1}`;
       const dotCls = r.stalled ? "chip-dot stalled" : "chip-dot";
       return `<button type="button" class="agent-chip ${isSel ? "active" : ""}" data-sid="${escapeHtml(
         r.sessionId || "",
@@ -305,49 +538,57 @@ function renderAgentChips() {
 }
 
 /**
- * Image-2 inspired compact telemetry bar:
- * Left: project + driver/counts
- * Right: [SVG Ring 60%]  [★ 115.6 tok/s]  [ılı 117.0M]
+ * Compact Telemetry Strip with Left Gear Button (⚙) + Clickable Metrics:
+ * [⚙] DSH · Project · 思4 工6 回2     [◐ 35%] [★ 115.6 tok/s] [ılı 353.1K]
  */
 function renderStats() {
   const s = state.session;
   const bar = $("stats-bar");
   const run = state.activeRun;
 
-  const leftParts = [];
+  const gearBtn = `
+    <button type="button" class="gear-btn" data-open-ins="settings" title="打开 ALilaS 设置与上游管理">
+      <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="8" r="2.3"></circle>
+        <path d="M8 1.6v1.3M8 13.1v1.3M1.6 8h1.3M13.1 8h1.3M3.5 3.5l.9.9M11.6 11.6l.9.9M12.5 3.5l-.9.9M4.4 11.6l-.9.9"></path>
+      </svg>
+    </button>`;
+
+  const leftParts = [gearBtn];
   if (s) {
     const st = s.stats || {};
     const proj = shortProjectName(s.cwd, "");
     const drv = shortDriverTag(run?.driver || s.driver);
     leftParts.push(`<span class="stat-driver">${escapeHtml(drv)}</span>`);
     if (proj) {
-      leftParts.push(`<span class="stat-item" title="${escapeHtml(s.cwd || "")}">${escapeHtml(proj)}</span>`);
+      leftParts.push(
+        `<span class="stat-item" title="${escapeHtml(s.cwd || "")}">${escapeHtml(proj)}</span>`,
+      );
     }
-    leftParts.push(`<span class="stat-item">思<b>${st.reasoningCount ?? 0}</b></span>`);
-    leftParts.push(`<span class="stat-item">工<b>${st.toolCallCount ?? 0}</b></span>`);
-    leftParts.push(`<span class="stat-item">回<b>${st.textCount ?? 0}</b></span>`);
+    leftParts.push(
+      `<span class="stat-item">思<b>${st.reasoningCount ?? 0}</b></span><span class="stat-item">工<b>${st.toolCallCount ?? 0}</b></span><span class="stat-item">回<b>${st.textCount ?? 0}</b></span>`,
+    );
   } else {
     leftParts.push(`<span class="stat-item muted">ALilaS 就绪</span>`);
   }
 
-  // Telemetry cluster (ring % · ★ tok/s · ılı total tokens)
   const usage = run?.usage || s?.usage || null;
   const cw = run?.contextWindow || s?.contextWindow || 1_000_000;
   const used = usage?.totalTokens || 0;
   const pct = used > 0 ? Math.min(100, (used / cw) * 100) : 0;
   const pctLabel = pct >= 10 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`;
   const ringTone = pct >= 85 ? "danger" : pct >= 70 ? "warn" : "";
-  const circumference = 37.7; // 2 * PI * 6
+  const circumference = 37.7;
   const dash = ((pct / 100) * circumference).toFixed(2);
 
   const cacheDenom = (usage?.inputTokens || 0) + (usage?.cacheReadTokens || 0);
   const cachePct =
     cacheDenom > 0 ? Math.round(((usage.cacheReadTokens || 0) / cacheDenom) * 100) : null;
   const ringTip = used
-    ? `上下文窗口 ${formatTokens(used)} / ${formatTokens(cw)} (${pct.toFixed(1)}%)${
-        cachePct !== null ? ` · 缓存命中 ${cachePct}%` : ""
+    ? `点击查看当前会话详情 · 上下文 ${formatTokens(used)} / ${formatTokens(cw)} (${pct.toFixed(1)}%)${
+        cachePct !== null ? ` · 缓存 ${cachePct}%` : ""
       }`
-    : `上下文窗口 0 / ${formatTokens(cw)}`;
+    : `点击查看当前会话详情 · 上下文 0 / ${formatTokens(cw)}`;
 
   const tps = run?.tps || s?.lastTps || state.telemetry?.lastTps || 0;
   const tpsLabel = tps > 0 ? `${tps.toFixed(1)} tok/s` : "-- tok/s";
@@ -358,34 +599,34 @@ function renderStats() {
     s?.cumulativeTokens ||
     used ||
     0;
-  const totalTip = `累计 Tokens: ${formatTokens(totalBurned)}（本会话: ${formatTokens(
+  const totalTip = `点击查看累计用量与热力图 · 累计 ${formatTokens(totalBurned)}（本会话: ${formatTokens(
     s?.cumulativeTokens || used,
-  )} · 历史总运行: ${state.telemetry?.totalRuns || 0} 次）`;
+  )}）`;
 
   const telemetryHtml = `
     <div class="telemetry">
-      <span class="tel-item tel-ring ${ringTone}" title="${escapeHtml(ringTip)}">
-        <svg class="ring-svg" viewBox="0 0 16 16" width="14" height="14">
+      <button type="button" class="tel-btn tel-ring ${ringTone}" data-open-ins="session" title="${escapeHtml(ringTip)}">
+        <svg class="ring-svg" viewBox="0 0 16 16" width="13" height="13">
           <circle class="ring-track" cx="8" cy="8" r="6" />
           <circle class="ring-fill" cx="8" cy="8" r="6" stroke-dasharray="${dash} ${circumference}" transform="rotate(-90 8 8)" />
         </svg>
         <span class="tel-pct">${used ? pctLabel : "0%"}</span>
-      </span>
-      <span class="tel-item" title="实时 / 最近一步输出速度">
+      </button>
+      <button type="button" class="tel-btn" data-open-ins="session" title="点击查看当前会话速度与调用明细">
         <span class="tel-star">★</span>
         <span class="tel-val">${tpsLabel}</span>
-      </span>
-      <span class="tel-item" title="${escapeHtml(totalTip)}">
-        <svg class="bars-svg" viewBox="0 0 14 14" width="12" height="12">
+      </button>
+      <button type="button" class="tel-btn" data-open-ins="usage" title="${escapeHtml(totalTip)}">
+        <svg class="bars-svg" viewBox="0 0 14 14" width="11" height="11">
           <rect x="1" y="7" width="2.4" height="6" rx="1" />
           <rect x="5.8" y="2" width="2.4" height="11" rx="1" />
           <rect x="10.6" y="4.5" width="2.4" height="8.5" rx="1" />
         </svg>
         <span class="tel-val">${formatTokens(totalBurned)}</span>
-      </span>
+      </button>
     </div>`;
 
-  bar.innerHTML = `<div class="stats-left">${leftParts.join('<span class="stat-sep">·</span>')}</div>${telemetryHtml}`;
+  bar.innerHTML = `<div class="stats-left">${leftParts.join("")}</div>${telemetryHtml}`;
 }
 
 function renderManageBar() {
@@ -411,97 +652,767 @@ function renderManageBar() {
   hideBtn.textContent = cur?.hidden ? "取消隐藏" : "隐藏";
 }
 
-function renderModelSelect() {
-  const sel = $("model-select");
-  const sig = JSON.stringify({
-    d: state.drivers.map((d) => [d.id, d.installed, (d.models || []).map((m) => m.id)]),
-    c: state.customProfiles.map((p) => [p.id, p.name, p.driver, p.model]),
-    def: state.defaultSelection,
-  });
+// ---------------------------------------------------------------- Model Capsule & Cascading Popover
 
-  if (sig !== state.lastModelsSig) {
-    state.lastModelsSig = sig;
-    const groups = [];
+function renderModelCapsule() {
+  const disp = getSelectionDisplay();
+  $("cap-model-name").textContent = disp.name || "自动模型";
+  $("cap-model-effort").textContent = disp.effort ? `· ${disp.effort}` : "";
+  const trigger = $("btn-model-trigger");
+  trigger.classList.toggle("open", state.popoverOpen);
+  trigger.title = `当前引擎: ${shortDriverTag(disp.driver)} | 模型: ${state.selection.model || "auto"} | 强度: ${
+    state.selection.effort || "high"
+  }（点击切换）`;
+}
 
-    // Custom upstream profiles first if any
-    if (state.customProfiles.length > 0) {
-      const opts = state.customProfiles
-        .map((p) => {
-          const isDef = state.defaultSelection.profileId === p.id;
-          return `<option value="profile:${escapeHtml(p.id)}">${isDef ? "★ " : ""}${escapeHtml(
-            p.name,
-          )} [${shortDriverTag(p.driver)}]</option>`;
+function renderModelPopover() {
+  const pop = $("model-popover");
+  pop.classList.toggle("open", state.popoverOpen);
+  if (!state.popoverOpen) return;
+
+  const tabsEl = $("pop-tabs");
+  const bodyEl = $("pop-body");
+  const q = state.popoverSearch.trim().toLowerCase();
+
+  const tabDefs = [
+    { id: "dsh", label: "DSH 上游", info: getDriverInfo("dsh") },
+    { id: "agy", label: "AGY 原生", info: getDriverInfo("agy") },
+    { id: "claude", label: "Claude", info: getDriverInfo("claude") },
+    { id: "codex", label: "Codex", info: getDriverInfo("codex") },
+    { id: "custom", label: "自定义", info: { installed: true } },
+  ];
+
+  tabsEl.innerHTML = tabDefs
+    .map((t) => {
+      const installed = t.id === "custom" ? state.customProfiles.length > 0 : Boolean(t.info?.installed);
+      const active = state.popoverTab === t.id;
+      return `<button type="button" class="pop-tab ${active ? "active" : ""}" data-pop-tab="${t.id}">
+        <span class="pop-tab-dot ${installed ? "" : "off"}"></span>
+        <span>${escapeHtml(t.label)}</span>
+      </button>`;
+    })
+    .join("");
+
+  // Render tab content
+  if (state.popoverTab === "agy") {
+    const dInfo = getDriverInfo("agy");
+    if (!dInfo?.installed) {
+      bodyEl.innerHTML = `<div class="pop-empty">未检测到 agy CLI。安装 Antigravity CLI 后点击 ⚙ → 刷新探测。</div>`;
+      return;
+    }
+    const groups = groupAgyModels(dInfo.models).filter(
+      (g) =>
+        !q ||
+        g.baseName.toLowerCase().includes(q) ||
+        g.variants.some((v) => v.modelId.toLowerCase().includes(q)),
+    );
+    if (!groups.length) {
+      bodyEl.innerHTML = `<div class="pop-empty">未找到匹配的 Antigravity 模型</div>`;
+      return;
+    }
+    bodyEl.innerHTML = groups
+      .map((g) => {
+        const rowKey = `agy::${g.baseName}`;
+        const activeVar = g.variants.find(
+          (v) => !state.selection.profileId && state.selection.driver === "agy" && state.selection.model === v.modelId,
+        );
+        const isSel = Boolean(activeVar);
+        const isExpanded = state.expandedModelRow === rowKey;
+        const preferredVar =
+          activeVar ||
+          g.variants.find((v) => v.effortKey === "high") ||
+          g.variants[0];
+        const isDef = isDefaultMatch("agy", preferredVar.modelId, preferredVar.effortKey);
+        const cwText = formatTokens(g.contextWindow);
+
+        const trayHtml = isExpanded
+          ? `<div class="effort-tray">
+              <div class="effort-chips">
+                ${g.variants
+                  .map(
+                    (v) =>
+                      `<button type="button" class="effort-chip ${
+                        activeVar?.modelId === v.modelId ? "active" : ""
+                      }" data-pick-driver="agy" data-pick-model="${escapeHtml(
+                        v.modelId,
+                      )}" data-pick-effort="${escapeHtml(v.effortKey)}" data-close-pop="1">${escapeHtml(
+                        v.variantLabel,
+                      )}</button>`,
+                  )
+                  .join("")}
+              </div>
+              <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-driver="agy" data-pin-model="${escapeHtml(
+                preferredVar.modelId,
+              )}" data-pin-effort="${escapeHtml(preferredVar.effortKey)}">${
+                isDef ? "★ 已默认" : "★ 设为默认"
+              }</button>
+            </div>`
+          : "";
+
+        return `<div class="pop-row-wrap">
+          <button type="button" class="pop-row ${isSel ? "selected" : ""}" data-toggle-row="${escapeHtml(
+            rowKey,
+          )}" data-pick-driver="agy" data-pick-model="${escapeHtml(
+            preferredVar.modelId,
+          )}" data-pick-effort="${escapeHtml(preferredVar.effortKey)}">
+            <span class="pop-row-left">
+              <span class="pop-row-name">${escapeHtml(g.baseName)}</span>
+              <span class="pop-row-sub">${escapeHtml(activeVar ? activeVar.variantLabel : preferredVar.variantLabel)} · ${cwText}</span>
+            </span>
+            <span class="pop-row-right">
+              ${isSel ? '<span class="pop-check">✓</span>' : ""}
+              <span>${isExpanded ? "▾" : "▸"}</span>
+            </span>
+          </button>
+          ${trayHtml}
+        </div>`;
+      })
+      .join("");
+    return;
+  }
+
+  if (state.popoverTab === "dsh") {
+    const dInfo = getDriverInfo("dsh");
+    if (!dInfo?.installed) {
+      bodyEl.innerHTML = `<div class="pop-empty">未检测到 dsh。请在环境变量设置 ALILAS_DSH_BIN 或安装 DeepSeek Harness。</div>`;
+      return;
+    }
+    const providers = dInfo.providers || [];
+    if (!providers.length) {
+      bodyEl.innerHTML = `<div class="pop-empty">未发现 DSH 上游模型。请在 ⚙ 设置中开启「扫描 DSH 桌面端上游」或配置 mode_a_patch.yml。</div>`;
+      return;
+    }
+
+    const activeProvKey =
+      state.selection.driver === "dsh" && state.selection.model?.includes("/")
+        ? state.selection.model.split("/")[0]
+        : "";
+
+    const blocks = [];
+    for (const p of providers) {
+      const provMatch =
+        q &&
+        ((p.displayName || "").toLowerCase().includes(q) || p.key.toLowerCase().includes(q));
+      const matchedModels = q
+        ? provMatch
+          ? p.models
+          : p.models.filter(
+              (m) =>
+                (m.name || "").toLowerCase().includes(q) ||
+                (m.id || "").toLowerCase().includes(q),
+            )
+        : p.models;
+      if (!matchedModels.length) continue;
+
+      const isOpen = Boolean(q) || state.expandedProviders.has(p.key);
+      const hasSelected = activeProvKey === p.key && !state.selection.profileId;
+      const srcTag = p.source === "plugin" ? `<span class="pop-badge plugin">插件</span>` : `<span class="pop-badge">桌面</span>`;
+
+      const rowsHtml = isOpen
+        ? `<div class="pop-group-list">${matchedModels
+            .map((m) => {
+              const compId = `${p.key}/${m.id}`;
+              const rowKey = `dsh::${compId}`;
+              const isSel =
+                !state.selection.profileId &&
+                state.selection.driver === "dsh" &&
+                (state.selection.model === compId || state.selection.model === m.id);
+              const curEffort = isSel ? state.selection.effort || "high" : "high";
+              const isExpanded = state.expandedModelRow === rowKey;
+              const efforts = ["off", ...(m.efforts?.length ? m.efforts : ["low", "medium", "high"])];
+              const isDef = isDefaultMatch("dsh", compId, curEffort);
+
+              const trayHtml = isExpanded
+                ? `<div class="effort-tray">
+                    <div class="effort-chips">
+                      ${efforts
+                        .map(
+                          (ef) =>
+                            `<button type="button" class="effort-chip ${
+                              isSel && curEffort === ef ? "active" : ""
+                            }" data-pick-driver="dsh" data-pick-model="${escapeHtml(
+                              compId,
+                            )}" data-pick-effort="${escapeHtml(ef)}" data-close-pop="1">${escapeHtml(
+                              effortLabel(ef),
+                            )}</button>`,
+                        )
+                        .join("")}
+                    </div>
+                    <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-driver="dsh" data-pin-model="${escapeHtml(
+                      compId,
+                    )}" data-pin-effort="${escapeHtml(curEffort)}">${
+                      isDef ? "★ 已默认" : "★ 设为默认"
+                    }</button>
+                  </div>`
+                : "";
+
+              return `<div class="pop-row-wrap">
+                <button type="button" class="pop-row ${isSel ? "selected" : ""}" data-toggle-row="${escapeHtml(
+                  rowKey,
+                )}" data-pick-driver="dsh" data-pick-model="${escapeHtml(
+                  compId,
+                )}" data-pick-effort="${escapeHtml(curEffort)}">
+                  <span class="pop-row-left">
+                    <span class="pop-row-name">${escapeHtml(m.name || m.id)}</span>
+                    <span class="pop-row-sub">${isSel ? effortLabel(curEffort) + " · " : ""}${formatTokens(
+                      m.contextWindow || 200000,
+                    )}</span>
+                  </span>
+                  <span class="pop-row-right">
+                    ${isSel ? '<span class="pop-check">✓</span>' : ""}
+                    <span>${isExpanded ? "▾" : "▸"}</span>
+                  </span>
+                </button>
+                ${trayHtml}
+              </div>`;
+            })
+            .join("")}</div>`
+        : "";
+
+      blocks.push(`<div class="pop-group">
+        <button type="button" class="pop-group-head" data-toggle-provider="${escapeHtml(p.key)}">
+          <span class="pop-group-left">
+            <span>${isOpen ? "▾" : "▸"}</span>
+            <span>${escapeHtml(p.displayName || p.key)}</span>
+            ${hasSelected ? '<span class="pop-check">●</span>' : ""}
+          </span>
+          <span class="pop-group-meta">${srcTag}<span>${matchedModels.length}</span></span>
+        </button>
+        ${rowsHtml}
+      </div>`);
+    }
+
+    bodyEl.innerHTML = blocks.length
+      ? blocks.join("")
+      : `<div class="pop-empty">未找到匹配的 DSH 上游或模型</div>`;
+    return;
+  }
+
+  if (state.popoverTab === "claude" || state.popoverTab === "codex") {
+    const drvId = state.popoverTab;
+    const dInfo = getDriverInfo(drvId);
+    const installed = Boolean(dInfo?.installed);
+    const efforts = drvId === "codex" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "max"];
+    const models = (dInfo?.models || []).filter(
+      (m) =>
+        !q ||
+        (m.name || "").toLowerCase().includes(q) ||
+        (m.id || "").toLowerCase().includes(q),
+    );
+    const notice = !installed
+      ? `<div class="notice-banner">本机尚未检测到 ${shortDriverTag(drvId)} CLI（若使用中转/ccswitch，安装 CLI 后点击 ⚙ → 刷新探测）</div>`
+      : "";
+    if (!models.length) {
+      bodyEl.innerHTML = notice + `<div class="pop-empty">暂无匹配模型</div>`;
+      return;
+    }
+    bodyEl.innerHTML =
+      notice +
+      models
+        .map((m) => {
+          const rowKey = `${drvId}::${m.id}`;
+          const isSel =
+            !state.selection.profileId &&
+            state.selection.driver === drvId &&
+            state.selection.model === m.id;
+          const curEffort = isSel ? state.selection.effort || "high" : "high";
+          const isExpanded = installed && state.expandedModelRow === rowKey;
+          const isDef = isDefaultMatch(drvId, m.id, curEffort);
+
+          const trayHtml = isExpanded
+            ? `<div class="effort-tray">
+                <div class="effort-chips">
+                  ${efforts
+                    .map(
+                      (ef) =>
+                        `<button type="button" class="effort-chip ${
+                          isSel && curEffort === ef ? "active" : ""
+                        }" data-pick-driver="${drvId}" data-pick-model="${escapeHtml(
+                          m.id,
+                        )}" data-pick-effort="${ef}" data-close-pop="1">${escapeHtml(
+                          effortLabel(ef),
+                        )}</button>`,
+                    )
+                    .join("")}
+                </div>
+                <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-driver="${drvId}" data-pin-model="${escapeHtml(
+                  m.id,
+                )}" data-pin-effort="${curEffort}">${isDef ? "★ 已默认" : "★ 设为默认"}</button>
+              </div>`
+            : "";
+
+          return `<div class="pop-row-wrap">
+            <button type="button" class="pop-row ${isSel ? "selected" : ""}" ${
+              installed ? "" : "disabled"
+            } data-toggle-row="${escapeHtml(rowKey)}" data-pick-driver="${drvId}" data-pick-model="${escapeHtml(
+              m.id,
+            )}" data-pick-effort="${curEffort}">
+              <span class="pop-row-left">
+                <span class="pop-row-name">${escapeHtml(m.name || m.id)}</span>
+                <span class="pop-row-sub">${formatTokens(m.contextWindow || 200000)}</span>
+              </span>
+              <span class="pop-row-right">
+                ${isSel ? '<span class="pop-check">✓</span>' : ""}
+                <span>${installed ? (isExpanded ? "▾" : "▸") : "未装"}</span>
+              </span>
+            </button>
+            ${trayHtml}
+          </div>`;
         })
         .join("");
-      groups.push(`<optgroup label="自定义上游预设">${opts}</optgroup>`);
-    }
-
-    for (const d of state.drivers) {
-      const statusLabel = d.installed ? "" : "（未安装）";
-      const models = d.models || [];
-      if (models.length === 0) {
-        groups.push(
-          `<optgroup label="${escapeHtml(d.label + statusLabel)}"><option value="${escapeHtml(
-            d.id,
-          )}::" ${d.installed ? "" : "disabled"}>${escapeHtml(d.label)} 默认${statusLabel}</option></optgroup>`,
-        );
-      } else {
-        const opts = models
-          .map((m) => {
-            const isDef =
-              !state.defaultSelection.profileId &&
-              state.defaultSelection.driver === d.id &&
-              state.defaultSelection.model === m.id;
-            return `<option value="${escapeHtml(d.id)}::${escapeHtml(m.id)}" ${
-              d.installed ? "" : "disabled"
-            }>${isDef ? "★ " : ""}${escapeHtml(m.name || m.id)}</option>`;
-          })
-          .join("");
-        groups.push(`<optgroup label="${escapeHtml(d.label + statusLabel)}">${opts}</optgroup>`);
-      }
-    }
-
-    sel.innerHTML = groups.join("") || '<option value="">自动选择引擎</option>';
-
-    // Pick initial selection if user hasn't manually changed it
-    if (!state.userTouchedModel) {
-      let desired = "";
-      if (state.defaultSelection.profileId) {
-        desired = `profile:${state.defaultSelection.profileId}`;
-      } else if (state.defaultSelection.driver && state.defaultSelection.model) {
-        desired = `${state.defaultSelection.driver}::${state.defaultSelection.model}`;
-      } else if (state.session?.driver && state.session?.model) {
-        desired = `${state.session.driver}::${state.session.model}`;
-      }
-      if (desired && Array.from(sel.options).some((o) => o.value === desired && !o.disabled)) {
-        sel.value = desired;
-        state.selectedModelKey = desired;
-      } else {
-        const firstEnabled = Array.from(sel.options).find((o) => !o.disabled);
-        if (firstEnabled) {
-          sel.value = firstEnabled.value;
-          state.selectedModelKey = firstEnabled.value;
-        }
-      }
-    }
+    return;
   }
 
-  // Render custom profiles list inside drawer
-  const listEl = $("custom-profiles-list");
-  if (listEl) {
-    listEl.innerHTML = state.customProfiles.length
-      ? state.customProfiles
-          .map(
-            (p) =>
-              `<div class="profile-row"><span><b>${escapeHtml(p.name)}</b> <span class="muted">[${shortDriverTag(
-                p.driver,
-              )}/${escapeHtml(p.model)}]</span></span><button type="button" class="icon-btn" data-del-profile="${escapeHtml(
+  // Custom profiles tab
+  const list = state.customProfiles.filter(
+    (p) =>
+      !q ||
+      (p.name || "").toLowerCase().includes(q) ||
+      (p.model || "").toLowerCase().includes(q),
+  );
+  const manageBtn = `<div style="padding:4px 2px 2px;display:flex;justify-content:flex-end;">
+    <button type="button" class="btn" data-open-ins="settings">⚙ 管理 / 新增自定义上游 →</button>
+  </div>`;
+  if (!list.length) {
+    bodyEl.innerHTML = `<div class="pop-empty">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>${manageBtn}`;
+    return;
+  }
+  bodyEl.innerHTML =
+    list
+      .map((p) => {
+        const isSel = state.selection.profileId === p.id;
+        const isDef = isDefaultMatch(p.driver, p.model, p.effort, p.id);
+        return `<div class="pop-row-wrap">
+          <div class="pop-row ${isSel ? "selected" : ""}" style="cursor:default;">
+            <button type="button" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;flex:1;min-width:0;" data-pick-profile="${escapeHtml(
+              p.id,
+            )}" data-close-pop="1">
+              <span class="pop-row-name">${escapeHtml(p.name)}</span>
+              <span class="pop-row-sub">[${shortDriverTag(p.driver)}/${escapeHtml(p.model)}]</span>
+            </button>
+            <span class="pop-row-right">
+              ${isSel ? '<span class="pop-check">✓</span>' : ""}
+              <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-profile="${escapeHtml(
                 p.id,
-              )}">删除</button></div>`,
-          )
-          .join("")
-      : `<div class="muted" style="font-size:11px;">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>`;
+              )}">${isDef ? "★ 已默认" : "设为默认"}</button>
+            </span>
+          </div>
+        </div>`;
+      })
+      .join("") + manageBtn;
+}
+
+// ---------------------------------------------------------------- Inspector Drawer (3 Tabs)
+
+function buildHeatmapHtml(dailyMap = {}) {
+  const days = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  // 16 weeks (112 days) ending today
+  const totalDays = 112;
+  let maxTokens = 0;
+  let activeDays = 0;
+  let rangeTokens = 0;
+
+  for (let i = totalDays - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86400_000);
+    const key = localDateKey(d.getTime());
+    const rec = dailyMap[key] || { tokens: 0, runs: 0 };
+    if (rec.tokens > maxTokens) maxTokens = rec.tokens;
+    if (rec.tokens > 0) activeDays++;
+    rangeTokens += rec.tokens || 0;
+    days.push({ key, tokens: rec.tokens || 0, runs: rec.runs || 0 });
   }
+
+  const cells = days
+    .map((day) => {
+      let cls = "";
+      if (day.tokens > 0 && maxTokens > 0) {
+        const r = day.tokens / maxTokens;
+        cls = r >= 0.75 ? "l4" : r >= 0.45 ? "l3" : r >= 0.18 ? "l2" : "l1";
+      }
+      return `<span class="hm-cell ${cls}" title="${day.key}: ${formatTokens(day.tokens)} tokens · ${day.runs} 次运行"></span>`;
+    })
+    .join("");
+
+  return {
+    html: `<div class="heatmap-wrap"><div class="heatmap-grid">${cells}</div></div>`,
+    activeDays,
+    rangeTokens,
+  };
+}
+
+function renderInspectorDrawer(force = false) {
+  const drawer = $("inspector-drawer");
+  drawer.classList.toggle("open", state.inspectorOpen);
+  if (!state.inspectorOpen) return;
+
+  drawer.querySelectorAll("[data-ins-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-ins-tab") === state.inspectorTab);
+  });
+
+  const body = $("ins-body");
+  // Never blow away focused form inputs inside Tab 3 during background polls
+  if (
+    !force &&
+    state.inspectorTab === "settings" &&
+    body.contains(document.activeElement) &&
+    ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName)
+  ) {
+    return;
+  }
+
+  if (state.inspectorTab === "session") {
+    const s = state.session;
+    const run = state.activeRun;
+    const usage = run?.usage || s?.usage || null;
+    const cw = run?.contextWindow || s?.contextWindow || 1_000_000;
+    const used = usage?.totalTokens || 0;
+    const remain = Math.max(0, cw - used);
+    const pct = cw > 0 ? Math.min(100, (used / cw) * 100) : 0;
+    const tone = pct >= 85 ? "danger" : pct >= 70 ? "warn" : "ok";
+    const toneText = pct >= 85 ? "紧张" : pct >= 70 ? "偏高" : "健康";
+
+    const tps = run?.tps || s?.lastTps || 0;
+    const durSec = run?.lastStepDurationSec || s?.lastStepDurationSec || 0;
+    const ttftSec = run?.ttftSec || s?.lastTtftSec || 0;
+    const lastOut =
+      (usage?.outputTokens || 0) + (usage?.thinkingTokens || 0) + (usage?.reasoningTokens || 0);
+    const cacheDenom = (usage?.inputTokens || 0) + (usage?.cacheReadTokens || 0);
+    const cachePct =
+      cacheDenom > 0 ? ((usage.cacheReadTokens / cacheDenom) * 100).toFixed(1) : null;
+
+    const sessCumTotal = s?.cumulativeTokens || run?.cumulativeTokens || used;
+    const sessCumIn = s?.cumulativeInputTokens || run?.cumulativeInputTokens || usage?.inputTokens || 0;
+    const sessCumCache = s?.cumulativeCacheReadTokens || run?.cumulativeCacheReadTokens || usage?.cacheReadTokens || 0;
+    const sessCumOut = s?.cumulativeOutputTokens || run?.cumulativeOutputTokens || lastOut;
+
+    const recent = (state.telemetry.recentCalls || []).slice(0, 8);
+    const recentHtml = recent.length
+      ? recent
+          .map((c) => {
+            const cDenom = (c.inputTokens || 0) + (c.cacheReadTokens || 0);
+            const cHit = cDenom > 0 ? `${Math.round((c.cacheReadTokens / cDenom) * 100)}%` : "--";
+            const cleanM = (c.model || c.driver).includes("/")
+              ? (c.model || "").split("/").slice(1).join("/")
+              : c.model || c.driver;
+            return `<div class="list-row">
+              <div class="list-row-left">
+                <span class="list-row-title">${escapeHtml(cleanM)} ${
+                  c.effort ? `<span class="pop-badge">${escapeHtml(effortLabel(c.effort))}</span>` : ""
+                }</span>
+                <span class="list-row-sub">${formatTime(c.time)} · 入 ${formatTokens(
+                  c.inputTokens,
+                )} · 缓 ${cHit} · 出 ${formatTokens(c.outputTokens)}</span>
+              </div>
+              <span class="list-row-right">${c.tps ? `${c.tps} tok/s` : "--"}${
+                c.durationSec ? ` · ${c.durationSec}s` : ""
+              }</span>
+            </div>`;
+          })
+          .join("")
+      : `<div class="muted" style="font-size:11.5px;">暂无近期调用记录，派活一次后将实时记录每步速度与缓存命中率。</div>`;
+
+    body.innerHTML = `
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>上下文预算速览</span>
+          <span class="pill-badge ${tone}">${toneText}</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill ${tone === "ok" ? "" : tone}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+        <div class="kpi-grid-3">
+          <div class="kpi-box">
+            <span class="kpi-label">当前已用</span>
+            <span class="kpi-val">${formatTokens(used)}</span>
+            <span class="kpi-sub">${pct.toFixed(1)}%</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">预算上限</span>
+            <span class="kpi-val">${formatTokens(cw)}</span>
+            <span class="kpi-sub">${shortDriverTag(run?.driver || s?.driver || state.selection.driver)}</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">剩余可用</span>
+            <span class="kpi-val">${formatTokens(remain)}</span>
+            <span class="kpi-sub">${(100 - pct).toFixed(1)}%</span>
+          </div>
+        </div>
+        ${
+          pct >= 85
+            ? `<div style="font-size:11px;color:var(--danger);">⚠️ 上下文已消耗 ${pct.toFixed(
+                1,
+              )}%，建议开启「新会话」或让引擎自动压缩。</div>`
+            : ""
+        }
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>最新生成体验与速度</span>
+          <span class="meta">${cachePct !== null ? `缓存命中 ${cachePct}%` : "等待遥测"}</span>
+        </div>
+        <div class="kpi-grid-2">
+          <div class="kpi-box">
+            <span class="kpi-label">纯流式速度</span>
+            <span class="kpi-val">${tps > 0 ? `${tps.toFixed(1)} tok/s` : "--"}</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">生成耗时</span>
+            <span class="kpi-val">${durSec > 0 ? `${durSec.toFixed(1)}s` : "--"}</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">首字延迟 (TTFT)</span>
+            <span class="kpi-val">${ttftSec > 0 ? `${ttftSec.toFixed(2)}s` : "--"}</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">最近输出</span>
+            <span class="kpi-val">${lastOut > 0 ? `${formatTokens(lastOut)} tok` : "--"}</span>
+          </div>
+        </div>
+        <div class="muted" style="font-size:11px;font-family:var(--mono);">
+          本会话累计: ${formatTokens(sessCumTotal)}（输入 ${formatTokens(sessCumIn)} · 缓存 ${formatTokens(
+            sessCumCache,
+          )} · 输出 ${formatTokens(sessCumOut)}）
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>最近调用记录</span>
+          <span class="meta">近 ${recent.length} 次</span>
+        </div>
+        ${recentHtml}
+      </div>`;
+    return;
+  }
+
+  if (state.inspectorTab === "usage") {
+    const t = state.telemetry || {};
+    const daily = t.daily || {};
+    const todayKey = localDateKey();
+    const monthPrefix = todayKey.slice(0, 7);
+    const todayRec = daily[todayKey] || { tokens: 0, runs: 0 };
+    let monthTokens = 0;
+    let monthRuns = 0;
+    for (const [k, v] of Object.entries(daily)) {
+      if (k.startsWith(monthPrefix)) {
+        monthTokens += v.tokens || 0;
+        monthRuns += v.runs || 0;
+      }
+    }
+
+    const inTok = t.allTimeInputTokens || 0;
+    const cacheTok = t.allTimeCacheReadTokens || 0;
+    const outTok = t.allTimeOutputTokens || 0;
+    const partsTotal = inTok + cacheTok + outTok;
+    const pIn = partsTotal > 0 ? (inTok / partsTotal) * 100 : 0;
+    const pCache = partsTotal > 0 ? (cacheTok / partsTotal) * 100 : 0;
+    const pOut = partsTotal > 0 ? (outTok / partsTotal) * 100 : 0;
+    const totalInDenom = inTok + cacheTok;
+    const cacheHitPct = totalInDenom > 0 ? ((cacheTok / totalInDenom) * 100).toFixed(1) : "0.0";
+
+    const hm = buildHeatmapHtml(daily);
+
+    const byDriverEntries = Object.entries(t.byDriver || {}).sort((a, b) => b[1] - a[1]);
+    const byModelEntries = Object.entries(t.byModel || {})
+      .sort((a, b) => (b[1]?.tokens || 0) - (a[1]?.tokens || 0))
+      .slice(0, 6);
+
+    body.innerHTML = `
+      <div class="kpi-grid-2">
+        <div class="kpi-box">
+          <span class="kpi-label">累计处理 Token</span>
+          <span class="kpi-val">${formatTokens(t.allTimeTokens || 0)}</span>
+          <span class="kpi-sub">${formatComma(t.allTimeTokens || 0)} tok</span>
+        </div>
+        <div class="kpi-box">
+          <span class="kpi-label">今日使用</span>
+          <span class="kpi-val">${formatTokens(todayRec.tokens)}</span>
+          <span class="kpi-sub">${todayRec.runs} 次运行</span>
+        </div>
+        <div class="kpi-box">
+          <span class="kpi-label">本月使用</span>
+          <span class="kpi-val">${formatTokens(monthTokens)}</span>
+          <span class="kpi-sub">${monthRuns} 次运行</span>
+        </div>
+        <div class="kpi-box">
+          <span class="kpi-label">总运行次数</span>
+          <span class="kpi-val">${t.totalRuns || 0}</span>
+          <span class="kpi-sub">${hm.activeDays} 天活跃记录</span>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>Token 构成与缓存命中</span>
+          <span class="pill-badge">缓存读取 ${cacheHitPct}%</span>
+        </div>
+        <div class="stack-bar">
+          <div class="stack-in" style="width:${pIn.toFixed(1)}%"></div>
+          <div class="stack-cache" style="width:${pCache.toFixed(1)}%"></div>
+          <div class="stack-out" style="width:${pOut.toFixed(1)}%"></div>
+        </div>
+        <div class="stack-legend">
+          <span><span class="leg-dot" style="background:var(--accent)"></span>未缓存输入 ${formatTokens(inTok)}</span>
+          <span><span class="leg-dot" style="background:var(--brand)"></span>缓存读取 ${formatTokens(cacheTok)}</span>
+          <span><span class="leg-dot" style="background:var(--success)"></span>输出 ${formatTokens(outTok)}</span>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>Token 活动（近 16 周）</span>
+          <span class="meta">区间合计 ${formatTokens(hm.rangeTokens)}</span>
+        </div>
+        ${hm.html}
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-head">
+          <span>按引擎 / 模型统计</span>
+          <span class="meta">纯精准 Token 计数</span>
+        </div>
+        ${
+          byDriverEntries.length
+            ? byDriverEntries
+                .map(
+                  ([drv, tok]) =>
+                    `<div class="list-row"><span class="list-row-title">${shortDriverTag(
+                      drv,
+                    )}</span><span class="list-row-right">${formatTokens(tok)}</span></div>`,
+                )
+                .join("")
+            : `<div class="muted" style="font-size:11.5px;">尚无引擎累计记录</div>`
+        }
+        ${
+          byModelEntries.length
+            ? `<div style="margin-top:4px;font-size:11px;color:var(--fg-3);">高频模型</div>` +
+              byModelEntries
+                .map(
+                  ([mKey, info]) =>
+                    `<div class="list-row"><div class="list-row-left"><span class="list-row-title">${escapeHtml(
+                      mKey,
+                    )}</span><span class="list-row-sub">${info.runs || 0} 次${
+                      info.lastTps ? ` · 最近 ${info.lastTps} tok/s` : ""
+                    }</span></div><span class="list-row-right">${formatTokens(
+                      info.tokens || 0,
+                    )}</span></div>`,
+                )
+                .join("")
+            : ""
+        }
+      </div>`;
+    return;
+  }
+
+  // Tab 3: Settings & Upstreams
+  const defDisp = getSelectionDisplay({
+    driver: state.defaultSelection.driver,
+    model: state.defaultSelection.model,
+    effort: state.defaultSelection.effort,
+    profileId: state.defaultSelection.profileId,
+  });
+
+  const driversHtml = state.drivers
+    .map(
+      (d) => `<div class="list-row">
+        <div class="list-row-left">
+          <span class="list-row-title"><span class="pop-tab-dot ${
+            d.installed ? "" : "off"
+          }" style="display:inline-block;margin-right:6px;"></span>${escapeHtml(d.label)}</span>
+          <span class="list-row-sub">${escapeHtml(d.detail || (d.installed ? "就绪" : "未安装"))}</span>
+        </div>
+        <span class="pill-badge ${d.installed ? "ok" : ""}">${d.installed ? "就绪" : "未装"}</span>
+      </div>`,
+    )
+    .join("");
+
+  const customListHtml = state.customProfiles.length
+    ? state.customProfiles
+        .map(
+          (p) => `<div class="list-row">
+            <div class="list-row-left">
+              <span class="list-row-title">${escapeHtml(p.name)}</span>
+              <span class="list-row-sub">[${shortDriverTag(p.driver)}] ${escapeHtml(p.model)}${
+                p.apiKeyEnv ? ` · $${escapeHtml(p.apiKeyEnv)}` : ""
+              }</span>
+            </div>
+            <button type="button" class="btn btn-danger" data-del-profile="${escapeHtml(p.id)}">删除</button>
+          </div>`,
+        )
+        .join("")
+    : `<div class="muted" style="font-size:11px;">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>`;
+
+  body.innerHTML = `
+    <div class="panel-card">
+      <div class="panel-head">
+        <span>默认子代理模型</span>
+        <button type="button" class="btn" id="btn-jump-model-picker">打开模型菜单</button>
+      </div>
+      <div class="list-row">
+        <div class="list-row-left">
+          <span class="list-row-title">${escapeHtml(defDisp.name)}${
+            defDisp.effort ? ` · ${escapeHtml(defDisp.effort)}` : ""
+          }</span>
+          <span class="list-row-sub">${escapeHtml(
+            `${state.defaultSelection.driver || "auto"} / ${state.defaultSelection.model || "auto"}`,
+          )}</span>
+        </div>
+        <span class="pill-badge">全局默认</span>
+      </div>
+    </div>
+
+    <div class="panel-card">
+      <div class="panel-head">
+        <span>引擎探测状态</span>
+        <button type="button" class="btn" id="btn-refresh-drivers">刷新探测</button>
+      </div>
+      ${driversHtml}
+    </div>
+
+    <div class="panel-card">
+      <div class="panel-head">
+        <span>运行与扫描设置</span>
+      </div>
+      <div class="setting-row">
+        <span>无活动卡死告警阈值（秒）</span>
+        <div style="display:flex;align-items:center;gap:5px;">
+          <input id="set-idle-sec" class="setting-input" type="number" min="60" max="600" style="width:74px;" value="${
+            state.settings.idleTimeoutSec || 180
+          }" />
+          <button type="button" class="btn" id="btn-save-idle">保存</button>
+        </div>
+      </div>
+      <label class="chk-label" style="justify-content:space-between;width:100%;">
+        <span>自动扫描 DSH 桌面端上游（只读）</span>
+        <input id="set-scan-dsh" type="checkbox" ${state.settings.scanDshDesktop !== false ? "checked" : ""} />
+      </label>
+    </div>
+
+    <div class="panel-card">
+      <div class="panel-head">
+        <span>自定义上游预设</span>
+        <span class="meta">仅存 Key 环境变量名</span>
+      </div>
+      <div class="form-grid">
+        <input id="pf-name" placeholder="预设名称（如 DeepSeek Relay）" />
+        <select id="pf-driver">
+          <option value="dsh">引擎: DSH (OpenAI 兼容)</option>
+          <option value="claude">引擎: Claude Code</option>
+          <option value="codex">引擎: Codex CLI</option>
+        </select>
+        <input id="pf-model" placeholder="模型 ID（必填）" />
+        <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" />
+        <input id="pf-baseurl" placeholder="Base URL（留空继承默认）" />
+        <input id="pf-keyenv" placeholder="API Key 环境变量名（非明文）" />
+      </div>
+      <div style="display:flex;justify-content:flex-end;">
+        <button id="btn-save-profile" type="button" class="btn btn-primary">保存预设</button>
+      </div>
+      ${customListHtml}
+    </div>`;
 }
 
 // ---------------------------------------------------------------- Timeline
@@ -696,7 +1607,7 @@ function renderTimeline(forceFull = false) {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-mark">ALilaS</div>
-        <div class="empty-desc">多引擎增强子代理就绪。选择下方模型直接发指令，或等待主代理派活。</div>
+        <div class="empty-desc">多引擎增强子代理就绪。点左下角模型胶囊切换模型与思考强度，或等待主代理派活。</div>
       </div>`;
     return;
   }
@@ -851,11 +1762,9 @@ function renderComposerState() {
 
   const willCreateNew = newChk.checked || !state.selectedSessionId || isDesktop;
   cwdRow.style.display = newChk.checked || !state.selectedSessionId ? "flex" : "none";
-  $("custom-drawer").style.display = state.showCustomModal ? "flex" : "none";
-  $("btn-add-profile").classList.toggle("active", state.showCustomModal);
 
   if (isDesktop && !newChk.checked) {
-    input.placeholder = "当前为桌面端只读会话；勾选「新会话」可直接派活…";
+    input.placeholder = "当前为桌面端只读会话；勾选「新」可直接派活…";
     sendBtn.disabled = true;
     cwdHint.textContent = "";
   } else {
@@ -865,19 +1774,22 @@ function renderComposerState() {
     sendBtn.disabled = false;
     cwdHint.textContent =
       !willCreateNew && state.session?.cwd
-        ? `📁 ${shortProjectName(state.session.cwd, "")}`
+        ? shortProjectName(state.session.cwd, "")
         : "";
     cwdHint.title = state.session?.cwd || "";
   }
 }
 
 function renderAll(forceFullTimeline = false) {
+  syncInitialSelection();
   renderStatus();
   renderSessionSelect();
   renderAgentChips();
   renderStats();
   renderManageBar();
-  renderModelSelect();
+  renderModelCapsule();
+  if (state.popoverOpen) renderModelPopover();
+  if (state.inspectorOpen) renderInspectorDrawer(false);
   renderComposerState();
 
   const errBar = $("error-banner");
@@ -917,11 +1829,15 @@ async function pollState(force = false) {
       state.activeRun = snap.activeRun || null;
       state.activeRuns = snap.activeRuns || [];
       if (snap.telemetry) state.telemetry = snap.telemetry;
+      if (snap.settings) state.settings = snap.settings;
 
       if (snap.unchanged) {
         renderStatus();
         renderAgentChips();
         renderStats();
+        if (state.inspectorOpen && state.inspectorTab !== "settings") {
+          renderInspectorDrawer(false);
+        }
         if (isRunningStatus(state.activeRun)) {
           const liveCard = $("live-stream-card");
           if (liveCard) {
@@ -959,6 +1875,68 @@ function scheduleNextPoll() {
   const running = anyActiveRun();
   const delay = hasLiveStream ? 650 : running ? 1300 : 4000;
   state.pollTimer = setTimeout(() => pollState(false), delay);
+}
+
+// ---------------------------------------------------------------- Actions
+
+function openPopover() {
+  state.popoverOpen = true;
+  state.popoverSearch = "";
+  $("model-search").value = "";
+  if (state.selection.profileId) {
+    state.popoverTab = "custom";
+  } else if (["dsh", "agy", "claude", "codex"].includes(state.selection.driver)) {
+    state.popoverTab = state.selection.driver;
+  }
+  if (state.selection.driver === "dsh" && state.selection.model?.includes("/")) {
+    state.expandedProviders.add(state.selection.model.split("/")[0]);
+  }
+  renderModelCapsule();
+  renderModelPopover();
+}
+
+function closePopover() {
+  if (!state.popoverOpen) return;
+  state.popoverOpen = false;
+  renderModelCapsule();
+  renderModelPopover();
+}
+
+function openInspector(tab = "session") {
+  closePopover();
+  state.inspectorOpen = true;
+  state.inspectorTab = tab;
+  renderInspectorDrawer(true);
+}
+
+function closeInspector() {
+  if (!state.inspectorOpen) return;
+  state.inspectorOpen = false;
+  renderInspectorDrawer(true);
+}
+
+async function pinDefaultModel({ driver = "", model = "", effort = "high", profileId = "" }) {
+  try {
+    const res = await app.callServerTool({
+      name: "alilas_ui_manage_profiles",
+      arguments: {
+        action: "set_default",
+        driver,
+        model,
+        effort,
+        profile_id: profileId,
+      },
+    });
+    const sc = res?.structuredContent;
+    if (sc?.defaultSelection) state.defaultSelection = sc.defaultSelection;
+    state.lastEtag = "";
+    showToast("已设为默认子代理模型");
+    renderModelCapsule();
+    if (state.popoverOpen) renderModelPopover();
+    if (state.inspectorOpen) renderInspectorDrawer(true);
+  } catch (e) {
+    showToast(`设置默认失败: ${e?.message || e}`);
+  }
 }
 
 // ---------------------------------------------------------------- Events
@@ -1026,6 +2004,235 @@ function bindEvents() {
     }
   });
 
+  // Telemetry bar & gear clicks -> open 3-tab Inspector Drawer
+  $("stats-bar").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-open-ins]");
+    if (!btn) return;
+    openInspector(btn.getAttribute("data-open-ins") || "session");
+  });
+
+  // Inspector drawer events
+  $("btn-close-inspector").addEventListener("click", closeInspector);
+  $("inspector-drawer").addEventListener("click", async (e) => {
+    const tabBtn = e.target.closest("[data-ins-tab]");
+    if (tabBtn) {
+      state.inspectorTab = tabBtn.getAttribute("data-ins-tab") || "session";
+      renderInspectorDrawer(true);
+      return;
+    }
+    if (e.target.closest("#btn-jump-model-picker")) {
+      closeInspector();
+      openPopover();
+      return;
+    }
+    if (e.target.closest("#btn-refresh-drivers")) {
+      const res = await app.callServerTool({
+        name: "alilas_ui_manage_profiles",
+        arguments: { action: "refresh_drivers" },
+      });
+      if (res?.structuredContent?.drivers) state.drivers = res.structuredContent.drivers;
+      state.lastEtag = "";
+      showToast("已重新探测引擎与上游");
+      renderInspectorDrawer(true);
+      renderModelCapsule();
+      return;
+    }
+    if (e.target.closest("#btn-save-idle")) {
+      const val = Number($("set-idle-sec")?.value) || 180;
+      const res = await app.callServerTool({
+        name: "alilas_ui_manage_profiles",
+        arguments: { action: "update_settings", settings: { idleTimeoutSec: val } },
+      });
+      if (res?.structuredContent?.settings) state.settings = res.structuredContent.settings;
+      state.lastEtag = "";
+      showToast(`已保存告警阈值 ${state.settings.idleTimeoutSec}s`);
+      renderInspectorDrawer(true);
+      return;
+    }
+    if (e.target.closest("#btn-save-profile")) {
+      const name = $("pf-name")?.value.trim() || "";
+      const driver = $("pf-driver")?.value || "dsh";
+      const model = $("pf-model")?.value.trim() || "";
+      const baseURL = $("pf-baseurl")?.value.trim() || "";
+      const apiKeyEnv = $("pf-keyenv")?.value.trim() || "";
+      const cw = Number($("pf-cw")?.value) || 200000;
+      if (!model) {
+        showToast("请填写模型 ID");
+        return;
+      }
+      const res = await app.callServerTool({
+        name: "alilas_ui_manage_profiles",
+        arguments: {
+          action: "upsert_profile",
+          profile: {
+            name: name || model,
+            driver,
+            provider: (name || "custom").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "custom",
+            model,
+            baseURL,
+            apiKeyEnv,
+            contextWindow: cw,
+          },
+        },
+      });
+      if (res?.structuredContent?.customProfiles) {
+        state.customProfiles = res.structuredContent.customProfiles;
+      }
+      state.lastEtag = "";
+      showToast("已保存上游预设");
+      renderInspectorDrawer(true);
+      return;
+    }
+    const delBtn = e.target.closest("[data-del-profile]");
+    if (delBtn) {
+      const res = await app.callServerTool({
+        name: "alilas_ui_manage_profiles",
+        arguments: { action: "delete_profile", profile_id: delBtn.getAttribute("data-del-profile") },
+      });
+      if (res?.structuredContent?.customProfiles) {
+        state.customProfiles = res.structuredContent.customProfiles;
+      }
+      state.lastEtag = "";
+      showToast("已删除预设");
+      renderInspectorDrawer(true);
+    }
+  });
+
+  $("inspector-drawer").addEventListener("change", async (e) => {
+    if (e.target?.id === "set-scan-dsh") {
+      const checked = Boolean(e.target.checked);
+      const res = await app.callServerTool({
+        name: "alilas_ui_manage_profiles",
+        arguments: { action: "update_settings", settings: { scanDshDesktop: checked } },
+      });
+      if (res?.structuredContent?.settings) state.settings = res.structuredContent.settings;
+      if (res?.structuredContent?.drivers) state.drivers = res.structuredContent.drivers;
+      state.lastEtag = "";
+      showToast(checked ? "已开启 DSH 桌面端上游扫描" : "已关闭 DSH 桌面端上游扫描");
+      renderInspectorDrawer(true);
+    }
+  });
+
+  // Model capsule & cascading popover
+  $("btn-model-trigger").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (state.popoverOpen) closePopover();
+    else openPopover();
+  });
+  $("btn-close-popover").addEventListener("click", closePopover);
+  $("model-search").addEventListener("input", (e) => {
+    state.popoverSearch = e.target.value || "";
+    renderModelPopover();
+  });
+
+  $("pop-tabs").addEventListener("click", (e) => {
+    const tabBtn = e.target.closest("[data-pop-tab]");
+    if (!tabBtn) return;
+    state.popoverTab = tabBtn.getAttribute("data-pop-tab") || "dsh";
+    renderModelPopover();
+  });
+
+  $("pop-body").addEventListener("click", async (e) => {
+    const openInsBtn = e.target.closest("[data-open-ins]");
+    if (openInsBtn) {
+      openInspector(openInsBtn.getAttribute("data-open-ins") || "settings");
+      return;
+    }
+
+    const pinProfBtn = e.target.closest("[data-pin-profile]");
+    if (pinProfBtn) {
+      e.stopPropagation();
+      const pid = pinProfBtn.getAttribute("data-pin-profile");
+      const p = state.customProfiles.find((x) => x.id === pid);
+      if (p) {
+        await pinDefaultModel({
+          driver: p.driver,
+          model: p.model,
+          effort: p.effort || "high",
+          profileId: p.id,
+        });
+      }
+      return;
+    }
+
+    const pinBtn = e.target.closest("[data-pin-driver]");
+    if (pinBtn) {
+      e.stopPropagation();
+      await pinDefaultModel({
+        driver: pinBtn.getAttribute("data-pin-driver") || "",
+        model: pinBtn.getAttribute("data-pin-model") || "",
+        effort: pinBtn.getAttribute("data-pin-effort") || "high",
+        profileId: "",
+      });
+      return;
+    }
+
+    const toggleProvBtn = e.target.closest("[data-toggle-provider]");
+    if (toggleProvBtn) {
+      const key = toggleProvBtn.getAttribute("data-toggle-provider");
+      if (state.expandedProviders.has(key)) state.expandedProviders.delete(key);
+      else state.expandedProviders.add(key);
+      renderModelPopover();
+      return;
+    }
+
+    const pickProfBtn = e.target.closest("[data-pick-profile]");
+    if (pickProfBtn) {
+      const pid = pickProfBtn.getAttribute("data-pick-profile");
+      const p = state.customProfiles.find((x) => x.id === pid);
+      if (p) {
+        state.selection = { driver: p.driver, model: p.model, effort: p.effort || "high", profileId: p.id };
+        state.userTouchedModel = true;
+        renderModelCapsule();
+        showToast(`已切换: ${p.name}`);
+        closePopover();
+      }
+      return;
+    }
+
+    const pickBtn = e.target.closest("[data-pick-driver]");
+    if (pickBtn) {
+      const drv = pickBtn.getAttribute("data-pick-driver") || "";
+      const mdl = pickBtn.getAttribute("data-pick-model") || "";
+      const eff = pickBtn.getAttribute("data-pick-effort") || "high";
+      const rowKey = pickBtn.getAttribute("data-toggle-row");
+      const shouldClose = pickBtn.getAttribute("data-close-pop") === "1";
+
+      state.selection = { driver: drv, model: mdl, effort: eff, profileId: "" };
+      state.userTouchedModel = true;
+
+      if (rowKey) {
+        state.expandedModelRow = state.expandedModelRow === rowKey ? "" : rowKey;
+      }
+      renderModelCapsule();
+      if (shouldClose) {
+        const d = getSelectionDisplay();
+        showToast(`已切换: ${d.name}${d.effort ? ` · ${d.effort}` : ""}`);
+        closePopover();
+      } else {
+        renderModelPopover();
+      }
+    }
+  });
+
+  // Dismiss popover on outside click or Escape
+  document.addEventListener("click", (e) => {
+    if (
+      state.popoverOpen &&
+      !e.target.closest("#model-popover") &&
+      !e.target.closest("#btn-model-trigger")
+    ) {
+      closePopover();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (state.popoverOpen) closePopover();
+      else if (state.inspectorOpen) closeInspector();
+    }
+  });
+
+  // Session & top bar actions
   $("agents-bar").addEventListener("click", (e) => {
     const chip = e.target.closest("[data-sid]");
     if (!chip) return;
@@ -1185,84 +2392,6 @@ function bindEvents() {
     }
   });
 
-  // Model selector & custom upstream profile drawer
-  $("model-select").addEventListener("change", (e) => {
-    state.selectedModelKey = e.target.value;
-    state.userTouchedModel = true;
-  });
-
-  $("btn-set-default-model").addEventListener("click", async () => {
-    const parsed = parseModelKey($("model-select").value);
-    if (!parsed.driver && !parsed.profileId) return;
-    await app.callServerTool({
-      name: "alilas_ui_manage_profiles",
-      arguments: {
-        action: "set_default",
-        driver: parsed.driver || "",
-        model: parsed.model || "",
-        profile_id: parsed.profileId || "",
-      },
-    });
-    state.lastModelsSig = "";
-    state.lastEtag = "";
-    showToast("已设为默认子代理模型");
-    pollState(true);
-  });
-
-  $("btn-add-profile").addEventListener("click", () => {
-    state.showCustomModal = !state.showCustomModal;
-    renderComposerState();
-  });
-
-  $("btn-save-profile").addEventListener("click", async () => {
-    const name = $("pf-name").value.trim();
-    const driver = $("pf-driver").value;
-    const model = $("pf-model").value.trim();
-    const baseURL = $("pf-baseurl").value.trim();
-    const apiKeyEnv = $("pf-keyenv").value.trim();
-    const cw = Number($("pf-cw").value) || 200000;
-    if (!model) {
-      showToast("请填写模型 ID");
-      return;
-    }
-    await app.callServerTool({
-      name: "alilas_ui_manage_profiles",
-      arguments: {
-        action: "upsert_profile",
-        profile: {
-          name: name || model,
-          driver,
-          provider: (name || "custom").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "custom",
-          model,
-          baseURL,
-          apiKeyEnv,
-          contextWindow: cw,
-        },
-      },
-    });
-    $("pf-name").value = "";
-    $("pf-model").value = "";
-    $("pf-baseurl").value = "";
-    $("pf-keyenv").value = "";
-    state.lastModelsSig = "";
-    state.lastEtag = "";
-    showToast("已保存上游预设");
-    pollState(true);
-  });
-
-  $("custom-profiles-list").addEventListener("click", async (e) => {
-    const delBtn = e.target.closest("[data-del-profile]");
-    if (!delBtn) return;
-    await app.callServerTool({
-      name: "alilas_ui_manage_profiles",
-      arguments: { action: "delete_profile", profile_id: delBtn.getAttribute("data-del-profile") },
-    });
-    state.lastModelsSig = "";
-    state.lastEtag = "";
-    showToast("已删除预设");
-    pollState(true);
-  });
-
   $("btn-perm-mode").addEventListener("click", () => {
     state.permissionMode = state.permissionMode === "auto" ? "readonly" : "auto";
     renderComposerState();
@@ -1280,8 +2409,9 @@ function bindEvents() {
     const input = $("task-input");
     const task = input.value.trim();
     if (!task) return;
+    closePopover();
     const forceNew = $("chk-new-session").checked;
-    const chosen = parseModelKey($("model-select").value);
+    const chosen = state.selection;
     const switchingDriver =
       state.session?.driver && chosen.driver && state.session.driver !== chosen.driver;
     const sid =
@@ -1297,8 +2427,9 @@ function bindEvents() {
           task,
           session_id: sid,
           cwd,
-          driver: chosen.driver,
-          model: chosen.model,
+          driver: chosen.driver || undefined,
+          model: chosen.model || undefined,
+          effort: chosen.effort || undefined,
           profile_id: chosen.profileId || undefined,
           permission_mode: state.permissionMode,
         },

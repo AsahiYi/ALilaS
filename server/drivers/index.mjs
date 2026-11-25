@@ -14,10 +14,10 @@ export function getDriver(driverId) {
   return DRIVERS[driverId] || null;
 }
 
-export function detectAllDrivers({ pluginRoot } = {}) {
+export function detectAllDrivers({ pluginRoot, scanDesktop = true } = {}) {
   return [
     agy.detect({ pluginRoot }),
-    dsh.detect({ pluginRoot }),
+    dsh.detect({ pluginRoot, scanDesktop }),
     claude.detect({ pluginRoot }),
     codex.detect({ pluginRoot }),
   ];

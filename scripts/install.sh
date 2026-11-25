@@ -7,12 +7,24 @@ TARGET_DIR="${HOME}/.gemini/config/plugins/alilas"
 echo "==> Installing ALilaS into ${TARGET_DIR}"
 mkdir -p "${TARGET_DIR}"
 
+# Preserve user-local mode_a_patch.yml if upgrading
+TMP_PATCH=""
+if [ -f "${TARGET_DIR}/config/mode_a_patch.yml" ]; then
+  TMP_PATCH="$(mktemp)"
+  cp "${TARGET_DIR}/config/mode_a_patch.yml" "${TMP_PATCH}"
+fi
+
 for item in plugin.json mcp_config.json README.md README.zh-CN.md LICENSE assets config rules skills server ui; do
   if [ -e "${REPO_DIR}/${item}" ]; then
     rm -rf "${TARGET_DIR}/${item}"
     cp -R "${REPO_DIR}/${item}" "${TARGET_DIR}/${item}"
   fi
 done
+
+if [ -n "${TMP_PATCH}" ] && [ -f "${TMP_PATCH}" ]; then
+  cp "${TMP_PATCH}" "${TARGET_DIR}/config/mode_a_patch.yml"
+  rm -f "${TMP_PATCH}"
+fi
 
 echo "==> Installing server dependencies"
 (cd "${TARGET_DIR}/server" && npm install --no-audit --no-fund)

@@ -51,12 +51,22 @@ const html = `<!doctype html>
     --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --radius: 8px;
+    --heat-0: rgba(148, 163, 184, 0.10);
+    --heat-1: rgba(167, 139, 250, 0.28);
+    --heat-2: rgba(167, 139, 250, 0.52);
+    --heat-3: rgba(167, 139, 250, 0.78);
+    --heat-4: #a78bfa;
   }
   :root[data-theme="light"] {
     --brand: #7c3aed;
     --brand-fg: #6d28d9;
     --brand-soft: rgba(124, 58, 237, 0.10);
     --brand-btn-fg: #ffffff;
+    --heat-0: rgba(100, 116, 139, 0.12);
+    --heat-1: rgba(124, 58, 237, 0.24);
+    --heat-2: rgba(124, 58, 237, 0.46);
+    --heat-3: rgba(124, 58, 237, 0.72);
+    --heat-4: #7c3aed;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -177,15 +187,23 @@ const html = `<!doctype html>
   .chip-dot.stalled { background: var(--warn); }
   .chip-meta { color: var(--fg-3); font-size: 10.5px; }
 
-  /* Stats & Image-2 Telemetry Strip */
+  /* Compact Telemetry & Gear Strip */
   .stats-bar {
     display: flex; align-items: center; justify-content: space-between;
-    gap: 8px; flex-wrap: wrap;
-    padding: 5px 12px; background: var(--bg-1);
+    gap: 6px; flex-wrap: wrap;
+    padding: 4px 10px; background: var(--bg-1);
     border-bottom: 1px solid var(--bd-2);
     font-size: 11px; color: var(--fg-2); flex-shrink: 0;
   }
-  .stats-left { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .stats-left { display: flex; align-items: center; gap: 5px; min-width: 0; flex-wrap: wrap; }
+  .gear-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 6px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--fg-3); cursor: pointer; padding: 0; flex-shrink: 0;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .gear-btn:hover { background: var(--bg-3); color: var(--fg-1); border-color: var(--bd-1); }
   .stat-driver {
     font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px;
     background: var(--brand-soft); color: var(--brand-fg); letter-spacing: 0.03em;
@@ -196,13 +214,20 @@ const html = `<!doctype html>
   .stat-sep { color: var(--bd-1); }
 
   .telemetry {
-    display: inline-flex; align-items: center; gap: 10px; margin-left: auto;
+    display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
     font-family: var(--mono); font-size: 11px;
   }
-  .tel-item { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-2); white-space: nowrap; }
+  .tel-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: transparent; border: 1px solid transparent; border-radius: 5px;
+    padding: 2px 5px; color: var(--fg-2); cursor: pointer;
+    font-family: var(--mono); font-size: 11px; white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .tel-btn:hover { background: var(--bg-2); border-color: var(--bd-1); color: var(--fg-1); }
   .tel-pct { color: var(--fg-1); font-weight: 700; }
   .tel-val { color: var(--fg-2); }
-  .tel-star { color: var(--brand); font-size: 12px; line-height: 1; }
+  .tel-star { color: var(--brand); font-size: 11.5px; line-height: 1; }
   .ring-svg { flex-shrink: 0; }
   .ring-track { fill: none; stroke: var(--bg-3); stroke-width: 2.3; }
   .ring-fill { fill: none; stroke: var(--fg-1); stroke-width: 2.3; stroke-linecap: round; }
@@ -341,26 +366,11 @@ const html = `<!doctype html>
   .spinner-sm { width: 9px; height: 9px; border-width: 1.5px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Composer & Model Bar */
+  /* Clean Composer + Bottom Model Capsule */
   .composer {
+    position: relative;
     border-top: 1px solid var(--bd-1); background: var(--bg-2);
-    padding: 7px 12px 9px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
-  }
-  .model-row { display: flex; align-items: center; gap: 5px; }
-  .model-row select { font-size: 11.5px; padding: 3px 6px; }
-  .custom-drawer {
-    display: none; flex-direction: column; gap: 5px;
-    padding: 8px; border: 1px solid var(--bd-1); border-radius: 6px; background: var(--bg-1);
-  }
-  .custom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-  .custom-drawer input, .custom-drawer select {
-    width: 100%; background: var(--bg-2); color: var(--fg-1);
-    border: 1px solid var(--bd-1); border-radius: 5px;
-    padding: 3px 6px; font-size: 11px; font-family: var(--font); outline: none;
-  }
-  .profile-row {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 11px; padding: 2px 0; border-bottom: 1px dashed var(--bd-2);
+    padding: 7px 10px 9px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
   }
   .cwd-row { display: none; align-items: center; gap: 6px; font-size: 11.5px; color: var(--fg-2); }
   .cwd-row input {
@@ -370,20 +380,259 @@ const html = `<!doctype html>
     padding: 3px 8px; font-family: var(--mono); font-size: 11.5px; outline: none;
   }
   textarea {
-    width: 100%; min-height: 42px; max-height: 120px; resize: vertical;
+    width: 100%; min-height: 44px; max-height: 128px; resize: vertical;
+    background: var(--bg-1); color: var(--fg-1);
+    border: 1px solid var(--bd-1); border-radius: 7px;
+    padding: 6px 9px; font-family: var(--font); font-size: 12.5px; outline: none;
+  }
+  .composer-actions {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  }
+  .composer-left {
+    display: flex; align-items: center; gap: 5px; min-width: 0; flex: 1; overflow: hidden;
+  }
+  .composer-right { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+
+  .model-capsule {
+    display: inline-flex; align-items: center; gap: 4px;
+    max-width: 210px; min-width: 0;
+    background: var(--bg-1); color: var(--fg-1);
+    border: 1px solid var(--bd-1); border-radius: 999px;
+    padding: 3px 9px 3px 8px; font-size: 11.5px; cursor: pointer;
+    transition: border-color 0.12s, background 0.12s;
+  }
+  .model-capsule:hover, .model-capsule.open {
+    border-color: var(--brand); background: var(--bg-3);
+  }
+  .cap-dot { color: var(--brand); font-size: 11px; flex-shrink: 0; }
+  .cap-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .cap-effort { color: var(--fg-3); font-size: 10.5px; flex-shrink: 0; }
+  .cap-caret { color: var(--fg-3); font-size: 10px; flex-shrink: 0; }
+
+  .cwd-hint {
+    font-size: 10.5px; color: var(--fg-3);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Cascading Model Popover (Image-3 inspired, side-pane ergonomic) */
+  .model-popover {
+    display: none; flex-direction: column;
+    position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px);
+    max-height: 360px; z-index: 25;
+    background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+  }
+  .model-popover.open { display: flex; }
+  .pop-head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 8px 6px; border-bottom: 1px solid var(--bd-2);
+  }
+  .pop-search {
+    flex: 1; min-width: 0;
     background: var(--bg-1); color: var(--fg-1);
     border: 1px solid var(--bd-1); border-radius: 6px;
-    padding: 6px 8px; font-family: var(--font); font-size: 12.5px; outline: none;
+    padding: 4px 8px; font-size: 11.5px; font-family: var(--font); outline: none;
   }
-  .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-  .composer-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .cwd-hint { font-size: 11px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop-tabs {
+    display: flex; align-items: center; gap: 3px;
+    padding: 5px 8px; border-bottom: 1px solid var(--bd-2);
+    overflow-x: auto; flex-shrink: 0;
+  }
+  .pop-tab {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 3px 8px; font-size: 11px; color: var(--fg-2); cursor: pointer; white-space: nowrap;
+  }
+  .pop-tab:hover { background: var(--bg-3); color: var(--fg-1); }
+  .pop-tab.active { background: var(--brand-soft); color: var(--brand-fg); border-color: var(--brand); font-weight: 600; }
+  .pop-tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+  .pop-tab-dot.off { background: var(--fg-3); opacity: 0.5; }
+  .pop-body {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 6px 7px;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .pop-empty { padding: 18px 10px; text-align: center; color: var(--fg-3); font-size: 11.5px; }
+
+  .pop-group {
+    border: 1px solid var(--bd-2); border-radius: 7px; background: var(--bg-1);
+    overflow: hidden; margin-bottom: 3px;
+  }
+  .pop-group-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    width: 100%; background: transparent; border: 0; padding: 6px 8px;
+    color: var(--fg-2); font-size: 11.5px; font-weight: 600; cursor: pointer; text-align: left;
+  }
+  .pop-group-head:hover { background: var(--bg-3); color: var(--fg-1); }
+  .pop-group-left { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+  .pop-group-meta { font-size: 10px; color: var(--fg-3); font-weight: 400; display: inline-flex; align-items: center; gap: 4px; }
+  .pop-badge {
+    font-size: 9.5px; padding: 0 4px; border-radius: 4px;
+    background: var(--bg-3); color: var(--fg-3);
+  }
+  .pop-badge.plugin { background: var(--brand-soft); color: var(--brand-fg); }
+  .pop-group-list {
+    border-top: 1px solid var(--bd-2); padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+
+  .pop-row-wrap {
+    border-radius: 6px; overflow: hidden;
+  }
+  .pop-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    width: 100%; background: transparent; border: 0; border-radius: 6px;
+    padding: 5px 8px; color: var(--fg-1); font-size: 12px; cursor: pointer; text-align: left;
+  }
+  .pop-row:hover:not(:disabled) { background: var(--bg-3); }
+  .pop-row.selected { background: var(--brand-soft); color: var(--brand-fg); }
+  .pop-row:disabled { opacity: 0.45; cursor: not-allowed; }
+  .pop-row-left { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+  .pop-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop-row-sub { color: var(--fg-3); font-size: 10.5px; flex-shrink: 0; }
+  .pop-row-right { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; color: var(--fg-3); font-size: 11px; }
+  .pop-check { color: var(--brand-fg); font-weight: 700; }
+
+  .effort-tray {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
+    padding: 5px 8px 6px; margin-top: 1px;
+    background: var(--bg-2); border-top: 1px dashed var(--bd-2);
+  }
+  .effort-chips { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .effort-chip {
+    background: var(--bg-1); color: var(--fg-2);
+    border: 1px solid var(--bd-1); border-radius: 5px;
+    padding: 2px 7px; font-size: 11px; cursor: pointer;
+  }
+  .effort-chip:hover { border-color: var(--brand); color: var(--fg-1); }
+  .effort-chip.active { background: var(--brand); color: var(--brand-btn-fg); border-color: transparent; font-weight: 600; }
+  .default-pin-btn {
+    background: transparent; color: var(--fg-3);
+    border: 1px solid var(--bd-1); border-radius: 5px;
+    padding: 2px 7px; font-size: 10.5px; cursor: pointer; white-space: nowrap;
+  }
+  .default-pin-btn:hover { color: var(--brand-fg); border-color: var(--brand); }
+  .default-pin-btn.is-def { background: var(--brand-soft); color: var(--brand-fg); border-color: var(--brand); }
+
+  /* Full-pane Telemetry & Settings Inspector Drawer (Images 5 & 7 inspired) */
+  .inspector-drawer {
+    display: none; flex-direction: column;
+    position: absolute; inset: 0; z-index: 35;
+    background: var(--bg-1);
+  }
+  .inspector-drawer.open { display: flex; }
+  .ins-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 9px 12px; background: var(--bg-2); border-bottom: 1px solid var(--bd-1);
+    flex-shrink: 0;
+  }
+  .ins-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px; }
+  .ins-ver { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); font-weight: 400; }
+  .ins-tabs {
+    display: flex; align-items: center; gap: 4px;
+    padding: 7px 12px; background: var(--bg-2); border-bottom: 1px solid var(--bd-2);
+    flex-shrink: 0;
+  }
+  .ins-tab {
+    flex: 1; text-align: center;
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 5px 8px; font-size: 12px; color: var(--fg-2); cursor: pointer;
+  }
+  .ins-tab:hover { background: var(--bg-3); color: var(--fg-1); }
+  .ins-tab.active { background: var(--bg-1); border-color: var(--bd-1); color: var(--fg-1); font-weight: 600; }
+  .ins-body {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+
+  .panel-card {
+    background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: 9px;
+    padding: 10px 11px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 12px; font-weight: 600; color: var(--fg-1);
+  }
+  .pill-badge {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+    background: var(--brand-soft); color: var(--brand-fg); font-weight: 600;
+  }
+  .pill-badge.ok { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+  .pill-badge.warn { background: rgba(251, 191, 36, 0.16); color: var(--warn); }
+  .pill-badge.danger { background: rgba(248, 113, 113, 0.18); color: var(--danger); }
+
+  .progress-track {
+    width: 100%; height: 7px; border-radius: 999px; background: var(--bg-3); overflow: hidden;
+  }
+  .progress-fill { height: 100%; border-radius: 999px; background: var(--brand); transition: width 0.2s; }
+  .progress-fill.warn { background: var(--warn); }
+  .progress-fill.danger { background: var(--danger); }
+
+  .kpi-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .kpi-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+  .kpi-box {
+    background: var(--bg-1); border: 1px solid var(--bd-2); border-radius: 7px;
+    padding: 7px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  }
+  .kpi-label { font-size: 10.5px; color: var(--fg-3); }
+  .kpi-val { font-family: var(--mono); font-size: 13.5px; font-weight: 700; color: var(--fg-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi-sub { font-size: 10px; color: var(--fg-3); font-family: var(--mono); }
+
+  .stack-bar {
+    display: flex; width: 100%; height: 8px; border-radius: 999px; overflow: hidden; background: var(--bg-3);
+  }
+  .stack-in { background: var(--accent); }
+  .stack-cache { background: var(--brand); }
+  .stack-out { background: var(--success); }
+  .stack-legend {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    font-size: 10.5px; color: var(--fg-2); font-family: var(--mono);
+  }
+  .leg-dot { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 4px; vertical-align: -0.5px; }
+
+  /* 16-week Activity Heatmap */
+  .heatmap-wrap { overflow-x: auto; padding-bottom: 2px; }
+  .heatmap-grid {
+    display: grid;
+    grid-template-rows: repeat(7, 10px);
+    grid-auto-flow: column;
+    grid-auto-columns: 10px;
+    gap: 3px;
+  }
+  .hm-cell {
+    width: 10px; height: 10px; border-radius: 2px; background: var(--heat-0);
+  }
+  .hm-cell.l1 { background: var(--heat-1); }
+  .hm-cell.l2 { background: var(--heat-2); }
+  .hm-cell.l3 { background: var(--heat-3); }
+  .hm-cell.l4 { background: var(--heat-4); }
+
+  .list-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 5px 7px; border-radius: 6px; background: var(--bg-1); border: 1px solid var(--bd-2);
+    font-size: 11.5px;
+  }
+  .list-row-left { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .list-row-title { font-weight: 600; color: var(--fg-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list-row-sub { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); }
+  .list-row-right { font-family: var(--mono); font-size: 11px; color: var(--fg-2); white-space: nowrap; }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .form-grid input, .form-grid select, .setting-input {
+    width: 100%; background: var(--bg-1); color: var(--fg-1);
+    border: 1px solid var(--bd-1); border-radius: 6px;
+    padding: 4px 7px; font-size: 11.5px; font-family: var(--font); outline: none;
+  }
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 12px; color: var(--fg-2);
+  }
 
   .toast {
-    position: absolute; bottom: 84px; left: 50%; transform: translateX(-50%) translateY(8px);
+    position: absolute; bottom: 82px; left: 50%; transform: translateX(-50%) translateY(8px);
     background: var(--bg-3); color: var(--fg-1); border: 1px solid var(--bd-1);
     padding: 4px 12px; border-radius: 999px; font-size: 11.5px;
-    opacity: 0; pointer-events: none; transition: opacity 0.16s, transform 0.16s; z-index: 20;
+    opacity: 0; pointer-events: none; transition: opacity 0.16s, transform 0.16s; z-index: 50;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
@@ -454,29 +703,14 @@ const html = `<!doctype html>
   <div id="timeline" class="timeline"></div>
 
   <div class="composer">
-    <div class="model-row">
-      <select id="model-select" title="选择本次子代理引擎与模型（多会话并发互不冲突）"></select>
-      <button id="btn-set-default-model" type="button" class="btn" title="将当前模型设为全局默认子代理模型">默认</button>
-      <button id="btn-add-profile" type="button" class="btn" title="管理自定义上游模型预设">+ 上游</button>
-    </div>
-
-    <div id="custom-drawer" class="custom-drawer">
-      <div class="custom-grid">
-        <input id="pf-name" placeholder="预设名称（如 DeepSeek Relay）" />
-        <select id="pf-driver">
-          <option value="dsh">引擎: DSH (OpenAI 兼容)</option>
-          <option value="claude">引擎: Claude Code</option>
-          <option value="codex">引擎: Codex CLI</option>
-        </select>
-        <input id="pf-model" placeholder="模型 ID（必填）" />
-        <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" />
-        <input id="pf-baseurl" placeholder="Base URL（留空继承 ccswitch/默认）" />
-        <input id="pf-keyenv" placeholder="API Key 环境变量名（非明文 Key）" />
+    <!-- Cascading Model Picker Popover -->
+    <div id="model-popover" class="model-popover" role="dialog" aria-label="选择子代理模型">
+      <div class="pop-head">
+        <input id="model-search" class="pop-search" placeholder="搜索模型或上游…" autocomplete="off" />
+        <button id="btn-close-popover" type="button" class="btn" title="关闭">✕</button>
       </div>
-      <div style="display:flex;justify-content:flex-end;gap:6px;">
-        <button id="btn-save-profile" type="button" class="btn btn-primary">保存预设</button>
-      </div>
-      <div id="custom-profiles-list"></div>
+      <div id="pop-tabs" class="pop-tabs"></div>
+      <div id="pop-body" class="pop-body"></div>
     </div>
 
     <div id="cwd-row" class="cwd-row">
@@ -488,18 +722,42 @@ const html = `<!doctype html>
     <textarea id="task-input" placeholder="继续当前会话… (Ctrl+Enter)"></textarea>
     <div class="composer-actions">
       <div class="composer-left">
-        <label class="chk-label">
+        <button id="btn-model-trigger" type="button" class="model-capsule" title="选择子代理引擎、模型与思考强度">
+          <span class="cap-dot">✦</span>
+          <span id="cap-model-name" class="cap-name">自动模型</span>
+          <span id="cap-model-effort" class="cap-effort"></span>
+          <span class="cap-caret">▾</span>
+        </button>
+        <label class="chk-label" title="开启全新独立会话">
           <input id="chk-new-session" type="checkbox" />
-          新会话
+          新
         </label>
         <button id="btn-perm-mode" type="button" class="btn" title="切换自动执行 / 只读审计模式">自动</button>
         <span id="cwd-hint" class="cwd-hint"></span>
       </div>
-      <div style="display:flex;gap:6px;">
-        <button id="btn-send-neon" type="button" class="btn" style="display:none;">发回对话</button>
+      <div class="composer-right">
+        <button id="btn-send-neon" type="button" class="btn" style="display:none;">发回</button>
         <button id="btn-send-task" type="button" class="btn btn-primary">发送</button>
       </div>
     </div>
+  </div>
+
+  <!-- Full-pane Telemetry & Settings Inspector Drawer -->
+  <div id="inspector-drawer" class="inspector-drawer" role="dialog" aria-label="ALilaS 遥测与设置">
+    <div class="ins-header">
+      <span class="ins-title">
+        ${logoDataUri ? `<img class="brand-icon" src="${logoDataUri}" alt="ALilaS" />` : ""}
+        ALilaS 遥测与设置
+        <span class="ins-ver">v3.1.0</span>
+      </span>
+      <button id="btn-close-inspector" type="button" class="btn" title="关闭">✕</button>
+    </div>
+    <div class="ins-tabs">
+      <button type="button" class="ins-tab active" data-ins-tab="session">当前会话</button>
+      <button type="button" class="ins-tab" data-ins-tab="usage">累计用量</button>
+      <button type="button" class="ins-tab" data-ins-tab="settings">设置与上游</button>
+    </div>
+    <div id="ins-body" class="ins-body"></div>
   </div>
 
   <div id="toast" class="toast"></div>

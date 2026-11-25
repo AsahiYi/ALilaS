@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex-34D399?style=flat-square" alt="4 Drivers" />
   <img src="https://img.shields.io/badge/MCP%20Apps-SEP--1865-60A5FA?style=flat-square" alt="MCP App" />
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22.15-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/Version-3.0.0-A78BFA?style=flat-square" alt="v3.0.0" />
+  <img src="https://img.shields.io/badge/Version-3.1.0-A78BFA?style=flat-square" alt="v3.1.0" />
   <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
 </p>
 
@@ -29,10 +29,12 @@ It unifies **four headless CLI agent engines** — **Antigravity Native (`agy`)*
   - **Antigravity Native (`agy`)**: Auto-discovers all native Antigravity models via `agy models` (Gemini 4 Neon/Carbon/Argon/Hydrogen, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, GPT-OSS 120B) with zero extra API keys.
   - **DeepSeek Harness (`dsh`)**: Runs Mode A headless with a zero-invasive local Cordis streaming probe (`stream_probe.mjs`) and per-run temporary `--patch` overlays for any custom OpenAI-compatible upstream model.
   - **Claude Code (`claude`) & Codex CLI (`codex`)**: Native `stream-json` / `exec --json` adapters with automatic CLI detection and zero-config compatibility with native logins, `~/.codex/config.toml`, and **ccswitch** / custom API relays.
+- **Compact Bottom Model Capsule + Cascading Effort & Provider Popover**
+  Reclaims vertical timeline space with a clean bottom capsule (`✦ Model · High ▾`). Opening the popover gives you instant search, engine tabs, base-model deduplication with inline **Thinking Effort** chips + `★ Set Default`, and **collapsible DSH provider accordions** (automatically scanning `~/.dsh/profiles/desktop/cordis.patch.yml` read-only with zero secret reads).
 - **Zero-Conflict Per-Run & Per-Session Model Switching**
-  Pin any model (native or custom upstream) as your default subagent model, while freely choosing a completely different engine or model in another concurrent session. `agy`/`claude`/`codex` pass per-process flags; `dsh` generates isolated per-run temporary `--patch` overlays cleaned up on exit — shared config files are never mutated.
-- **Live Telemetry Strip (`◐ 60%  ★ 115.6 tok/s  ılı 117.0M`)**
-  Real-time circular SVG context-window ring (color-coded at 70%/85% with prompt-cache hit-rate tooltip), live & step-calibrated output throughput (`tok/s`), and persistent lifetime/session token counters.
+  Pin any model (native, discovered DSH upstream, or custom preset) as your default subagent model, while freely choosing a completely different engine or model in another concurrent session. `agy`/`claude`/`codex` pass per-process flags; `dsh` generates isolated per-run temporary `--patch` overlays cleaned up on exit — shared config files are never mutated.
+- **Live Telemetry Strip + Clickable 3-Tab Inspector Drawer (`⚙  ◐ 35%  ★ 115.6 tok/s  ılı 117.0M`)**
+  Real-time circular SVG context-window ring (color-coded at 70%/85%), live & historical step-calibrated throughput (`tok/s`), and clickable `⚙` / telemetry pills opening a 3-tab drawer (**Current Session** context budget & TTFT/TPS, **Lifetime Usage** 16-week token heatmap & cache-hit ratio without fake price estimates, and **Settings & Upstreams**).
 - **Merged Tool Cards + Click-to-Open Files**
   Pairs tool calls with results into one collapsible card with exact durations (`ms`/`s`), error highlighting, smart parameter summaries, and clickable file pills via Antigravity's `com.google.antigravity/toggle-aux-pane`.
 - **Auto / Read-Only Permission Modes**

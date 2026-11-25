@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex-34D399?style=flat-square" alt="4 Drivers" />
   <img src="https://img.shields.io/badge/MCP%20Apps-SEP--1865-60A5FA?style=flat-square" alt="MCP App" />
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22.15-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/Version-3.0.0-A78BFA?style=flat-square" alt="v3.0.0" />
+  <img src="https://img.shields.io/badge/Version-3.1.0-A78BFA?style=flat-square" alt="v3.1.0" />
   <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
 </p>
 
@@ -29,12 +29,13 @@
   - **Antigravity 原生（`agy`）**：通过 `agy models` 自动拉取全量原生模型（Gemini 4 Neon/Carbon/Argon/Hydrogen、Gemini 3.8 Flash、Claude Opus/Sonnet 5.5、GPT-OSS 120B），**免额外 API Key**、直用 Antigravity 额度。
   - **DeepSeek Harness（`dsh`）**：官方 Mode A 无头驱动 + 零侵入本地 Cordis 探针（`stream_probe.mjs`），支持 1M 上下文与任意 OpenAI 兼容自定义上游模型。
   - **Claude Code（`claude`）& Codex CLI（`codex`）**：内置标准 `stream-json` / `exec --json` 协议适配，自动检测安装状态，**原生零配置兼容 ccswitch 及中转站环境变量**。
+- **精简底部模型胶囊 + 两级级联选择弹窗**
+  去除冗余顶部下拉条，底部仅留一枚精简模型胶囊（`✦ DeepSeek-V4.1-Flash · 高 ▾`）。点击弹出的紧凑菜单支持关键词搜索、引擎分页、原生模型按基名合并折叠 **Thinking Effort** 强度芯片与 `★ 设为默认`，以及 **DSH 上游按渠道手风琴折叠**（自动只读扫描本机 `~/.dsh/profiles/desktop/cordis.patch.yml` 全部上游与模型，绝不碰明文 Key）。
 - **自由选模型，多会话并发零冲突**
-  可在面板一键设置全局「默认子代理模型」，也能在任意新会话随时切到其他引擎或自定义上游模型；`agy`/`claude`/`codex` 走进程级 CLI 参数隔离，`dsh` 按单次运行生成独立临时 `--patch`（退出即删），绝不覆写共享配置，十个并发子代理用十个不同模型也互不打架。
-- **极简遥测条（`◐ 60%  ★ 115.6 tok/s  ılı 117.0M`）**
-  - **SVG 细圆环上下文进度**：按模型窗口实时绘制（>70% 橙色、>85% 红色，悬停看缓存命中率）；
-  - **实时与校准 TPS**：流式吐字即时测速，步末用精确 `outputTokens / durationSec` 校准；
-  - **跨重启累计 Token 统计**：持久化记录单会话与全插件历史总用量。
+  可在面板一键设置全局「默认子代理模型」，也能在任意新会话随时切到其他引擎、DSH 任意上游或自定义预设；`agy`/`claude`/`codex` 走进程级 CLI 参数隔离，`dsh` 按单次运行生成独立临时 `--patch`（退出即删），绝不覆写共享配置，十个并发子代理用十个不同模型也互不打架。
+- **极简遥测条 + 可点击三标签抽屉（`⚙  ◐ 35%  ★ 115.6 tok/s  ılı 117.0M`）**
+  - **SVG 细圆环上下文进度 + 实测 TPS + 累计 Token**：支持实时流测速与历史 DSH 会话步长反推真实 `tok/s`；
+  - **点击 `⚙` 或遥测数字展开全屏内嵌抽屉**：「当前会话」（上下文预算条、纯流式速度 / 耗时 / TTFT / 缓存命中 / 最近调用）、「累计用量」（精准 Token 计数、缓存构成条、近 16 周活动热力图、按引擎/模型分布，拒绝拍脑袋估价）、「设置与上游」（引擎探测刷新、卡死阈值、DSH 桌面扫描开关与自定义上游预设）。
 - **工具调用 Call + Result 合并 & 点击直达文件**
   按 `toolCallId` 自动配对合并为单张折叠卡，显示精确耗时（`ms`/`s`）、真实报错与智能参数摘要；点击文件名胶囊通过 Antigravity 原生 `toggle-aux-pane` 直接在侧栏预览文件。
 - **自动执行 / 只读审计一键切换**

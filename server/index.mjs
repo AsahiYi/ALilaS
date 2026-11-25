@@ -242,14 +242,17 @@ function killProcessTree(child) {
 
 let driversCache = null;
 let driversCacheAt = 0;
+let driversVersion = 1;
 
 function getDetectedDrivers(force = false) {
   const now = Date.now();
   if (!force && driversCache && now - driversCacheAt < 60_000) {
     return driversCache;
   }
-  driversCache = detectAllDrivers({ pluginRoot: PLUGIN_ROOT });
+  const scanDesktop = profileStore.getSnapshot().settings?.scanDshDesktop !== false;
+  driversCache = detectAllDrivers({ pluginRoot: PLUGIN_ROOT, scanDesktop });
   driversCacheAt = now;
+  driversVersion++;
   return driversCache;
 }
 
@@ -270,7 +273,7 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
 
   const detected = getDetectedDrivers(false);
   if (!effectiveDriver || effectiveDriver === "auto") {
-    // Prefer dsh if configured with mode_a_patch.yml, else agy, else first installed
+    // Prefer dsh if configured with models, else agy, else first installed
     const dshInfo = detected.find((d) => d.id === "dsh" && d.installed && d.models?.length > 0);
     const agyInfo = detected.find((d) => d.id === "agy" && d.installed);
     const anyInstalled = detected.find((d) => d.installed);
@@ -284,11 +287,9 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
     (def.driver === effectiveDriver ? def.model : "") ||
     "";
 
-  if (!effectiveModel) {
-    const dInfo = detected.find((d) => d.id === effectiveDriver);
-    if (dInfo?.models?.length > 0) {
-      effectiveModel = dInfo.models[0].id;
-    }
+  const dInfo = detected.find((d) => d.id === effectiveDriver);
+  if (!effectiveModel && dInfo?.models?.length > 0) {
+    effectiveModel = dInfo.models[0].compositeId || dInfo.models[0].id;
   }
 
   const effectiveEffort =
@@ -298,8 +299,9 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
     def.effort ||
     "high";
 
-  const dInfo = detected.find((d) => d.id === effectiveDriver);
-  const foundModel = dInfo?.models?.find((m) => m.id === effectiveModel);
+  const foundModel = dInfo?.models?.find(
+    (m) => m.compositeId === effectiveModel || m.id === effectiveModel,
+  );
   const contextWindow =
     profile?.contextWindow ||
     foundModel?.contextWindow ||
@@ -396,7 +398,12 @@ function serializeRun(run) {
     stderrTail: run.stderrTail,
     usage: run.latestUsage || null,
     tps: computeLiveTps(run),
+    ttftSec: run.lastTtftSec || 0,
+    lastStepDurationSec: run.lastStepDurationSec || 0,
     cumulativeTokens: run.cumulativeTokens || 0,
+    cumulativeInputTokens: run.cumulativeInputTokens || 0,
+    cumulativeCacheReadTokens: run.cumulativeCacheReadTokens || 0,
+    cumulativeOutputTokens: run.cumulativeOutputTokens || 0,
     live: run.live.active
       ? {
           active: true,
@@ -507,7 +514,8 @@ function launchSubagentRun({
     typeof timeoutSec === "number" && timeoutSec > 0
       ? Math.max(30, Math.min(timeoutSec, 86400)) * 1000
       : 0;
-  const clampedIdleSec = Math.max(60, Math.min(idleTimeoutSec || 180, 600));
+  const defaultIdleSec = profileStore.getSnapshot().settings?.idleTimeoutSec || 180;
+  const clampedIdleSec = Math.max(60, Math.min(idleTimeoutSec || defaultIdleSec, 600));
 
   const inv = driverMod.buildInvocation({
     runId,
@@ -558,7 +566,13 @@ function launchSubagentRun({
     stderrTail: "",
     latestUsage: null,
     tps: 0,
+    stepStartAt: now,
+    lastTtftSec: 0,
+    lastStepDurationSec: 0,
     cumulativeTokens: 0,
+    cumulativeInputTokens: 0,
+    cumulativeCacheReadTokens: 0,
+    cumulativeOutputTokens: 0,
     cleanupPaths: inv.cleanupPaths || [],
     live: {
       active: false,
@@ -625,7 +639,7 @@ function launchSubagentRun({
   }
 
   runs.set(runId, run);
-  profileStore.recordUsageDelta({ driver: sel.driver, incrementRun: true });
+  profileStore.recordUsageDelta({ driver: sel.driver, model: sel.model, incrementRun: true });
 
   if (runs.size > 35) {
     for (const [k, v] of runs.entries()) {
@@ -662,6 +676,7 @@ function launchSubagentRun({
     if (ev.type === "status") {
       if (run.status === "starting") run.status = "running";
       if (ev.phase) run.phase = ev.phase;
+      if (ev.phase === "step_start") run.stepStartAt = Date.now();
       if (typeof ev.turn === "number") run.turn = ev.turn;
       if (typeof ev.step === "number") run.step = ev.step;
       if (ev.phase === "turn_end") {
@@ -679,6 +694,7 @@ function launchSubagentRun({
     if (ev.type === "stream_start") {
       run.live.active = true;
       run.live.step = ev.step || run.step || 1;
+      if (!run.stepStartAt) run.stepStartAt = Date.now();
       run.live.reasoning = "";
       run.live.text = "";
       run.live.toolName = "";
@@ -690,7 +706,15 @@ function launchSubagentRun({
 
     if (ev.type === "reasoning_delta" && ev.text) {
       run.live.active = true;
-      if (!run.live.firstDeltaAt) run.live.firstDeltaAt = Date.now();
+      if (!run.live.firstDeltaAt) {
+        const ts = Date.now();
+        run.live.firstDeltaAt = ts;
+        const baseTs = run.stepStartAt || run.startedAt;
+        if (baseTs && ts > baseTs) {
+          const ttft = (ts - baseTs) / 1000;
+          if (ttft >= 0.05 && ttft < 600) run.lastTtftSec = Math.round(ttft * 100) / 100;
+        }
+      }
       run.live.deltaChars += ev.text.length;
       if (ev.step) run.live.step = ev.step;
       run.phase = "thinking";
@@ -701,7 +725,15 @@ function launchSubagentRun({
 
     if (ev.type === "text_delta" && ev.text) {
       run.live.active = true;
-      if (!run.live.firstDeltaAt) run.live.firstDeltaAt = Date.now();
+      if (!run.live.firstDeltaAt) {
+        const ts = Date.now();
+        run.live.firstDeltaAt = ts;
+        const baseTs = run.stepStartAt || run.startedAt;
+        if (baseTs && ts > baseTs) {
+          const ttft = (ts - baseTs) / 1000;
+          if (ttft >= 0.05 && ttft < 600) run.lastTtftSec = Math.round(ttft * 100) / 100;
+        }
+      }
       run.live.deltaChars += ev.text.length;
       if (ev.step) run.live.step = ev.step;
       run.phase = "writing";
@@ -843,29 +875,58 @@ function launchSubagentRun({
 
     if (ev.type === "usage" && ev.usage) {
       run.latestUsage = ev.usage;
-      const genTokens = (ev.usage.outputTokens || 0) + (ev.usage.thinkingTokens || 0);
+      const nowTs = Date.now();
+      const inputTokens = ev.usage.inputTokens || 0;
+      const cacheReadTokens = ev.usage.cacheReadTokens || 0;
+      const genTokens = (ev.usage.outputTokens || 0) + (ev.usage.thinkingTokens || 0) + (ev.usage.reasoningTokens || 0);
       const stepTotal = ev.usage.totalTokens || 0;
-      if (ev.durationSec && ev.durationSec > 0.1 && genTokens > 0) {
-        run.tps = Math.round((genTokens / ev.durationSec) * 10) / 10;
-      } else if (run.live.firstDeltaAt && genTokens > 0) {
-        const dt = Math.max(0.2, (Date.now() - run.live.firstDeltaAt) / 1000);
-        run.tps = Math.round((genTokens / dt) * 10) / 10;
+      const rawDur =
+        ev.durationSec && ev.durationSec > 0.05
+          ? ev.durationSec
+          : run.stepStartAt && nowTs > run.stepStartAt
+            ? (nowTs - run.stepStartAt) / 1000
+            : 0;
+      if (rawDur > 0) run.lastStepDurationSec = Math.round(rawDur * 10) / 10;
+
+      // Prefer pure streaming throughput (firstDeltaAt -> now) if available, else step duration
+      if (run.live.firstDeltaAt && genTokens > 0) {
+        const streamDt = Math.max(0.2, (nowTs - run.live.firstDeltaAt) / 1000);
+        run.tps = Math.round((genTokens / streamDt) * 10) / 10;
+      } else if (rawDur > 0.1 && genTokens > 0) {
+        run.tps = Math.round((genTokens / rawDur) * 10) / 10;
       }
+
       if (stepTotal > 0) {
         run.cumulativeTokens += stepTotal;
+        run.cumulativeInputTokens += inputTokens;
+        run.cumulativeCacheReadTokens += cacheReadTokens;
+        run.cumulativeOutputTokens += genTokens;
         profileStore.recordUsageDelta({
           driver: run.driver,
-          totalTokens: stepTotal,
+          model: run.model,
+          effort: run.effort,
+          inputTokens,
+          cacheReadTokens,
           outputTokens: genTokens,
+          totalTokens: stepTotal,
           tps: run.tps,
+          ttftSec: run.lastTtftSec,
+          durationSec: run.lastStepDurationSec,
+          status: run.error ? "error" : "ok",
         });
       }
       if (run.timelineDoc) {
         run.timelineDoc.usage = ev.usage;
         if (run.tps) run.timelineDoc.lastTps = run.tps;
+        if (run.lastStepDurationSec) run.timelineDoc.lastStepDurationSec = run.lastStepDurationSec;
+        if (run.lastTtftSec) run.timelineDoc.lastTtftSec = run.lastTtftSec;
         run.timelineDoc.cumulativeTokens = (run.timelineDoc.cumulativeTokens || 0) + stepTotal;
+        run.timelineDoc.cumulativeInputTokens = (run.timelineDoc.cumulativeInputTokens || 0) + inputTokens;
+        run.timelineDoc.cumulativeCacheReadTokens = (run.timelineDoc.cumulativeCacheReadTokens || 0) + cacheReadTokens;
+        run.timelineDoc.cumulativeOutputTokens = (run.timelineDoc.cumulativeOutputTokens || 0) + genTokens;
         timelineStore.save(run.timelineDoc);
       }
+      run.stepStartAt = 0;
       run.live.seq++;
       return;
     }
@@ -1091,9 +1152,16 @@ function loadSessionView(sessionId, maxItems = 180) {
     parsed.driver = meta.driver || "dsh";
     parsed.model = meta.model || "";
     parsed.effort = meta.effort || "";
-    parsed.contextWindow = inferContextWindow(parsed.model, 1_000_000);
-    parsed.lastTps = run?.tps || 0;
-    parsed.cumulativeTokens = parsed.usage?.totalTokens || 0;
+    const dshInfo = getDetectedDrivers(false).find((d) => d.id === "dsh");
+    const matchedM = dshInfo?.models?.find(
+      (m) => m.compositeId === parsed.model || m.id === parsed.model,
+    );
+    parsed.contextWindow = matchedM?.contextWindow || inferContextWindow(parsed.model, 1_000_000);
+    parsed.lastTps = (run && run.tps > 0 ? run.tps : parsed.lastTps) || 0;
+    parsed.lastStepDurationSec =
+      (run && run.lastStepDurationSec > 0 ? run.lastStepDurationSec : parsed.lastStepDurationSec) || 0;
+    parsed.lastTtftSec = run?.lastTtftSec || 0;
+    parsed.cumulativeTokens = parsed.cumulativeTokens || parsed.usage?.totalTokens || 0;
     parsed.alias = meta.alias || "";
     parsed.pinned = Boolean(meta.pinned);
     parsed.hidden = Boolean(meta.hidden);
@@ -1116,7 +1184,12 @@ function loadSessionView(sessionId, maxItems = 180) {
       isHeadless: true,
       usage: run.latestUsage || null,
       lastTps: computeLiveTps(run),
+      lastStepDurationSec: run.lastStepDurationSec || 0,
+      lastTtftSec: run.lastTtftSec || 0,
       cumulativeTokens: run.cumulativeTokens || 0,
+      cumulativeInputTokens: run.cumulativeInputTokens || 0,
+      cumulativeCacheReadTokens: run.cumulativeCacheReadTokens || 0,
+      cumulativeOutputTokens: run.cumulativeOutputTokens || 0,
       stats: {
         totalEvents: 0,
         turns: run.turn || 1,
@@ -1303,6 +1376,7 @@ function buildStateSnapshot({
     sessions[0]?.mtimeMs || 0,
     registryVersion,
     profileStore.getVersion(),
+    driversVersion,
     headlessOnly ? 1 : 0,
     pluginOnly ? 1 : 0,
     includeHidden ? 1 : 0,
@@ -1374,6 +1448,7 @@ function buildStateSnapshot({
     recentCwds,
     drivers: getDetectedDrivers(false),
     defaultSelection: profSnap.defaultSelection,
+    settings: profSnap.settings,
     customProfiles: profSnap.customProfiles,
     telemetry: profSnap.telemetry,
     sessions,
@@ -1388,7 +1463,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.0.0",
+  version: "3.1.0",
 });
 
 registerAppResource(
@@ -1486,7 +1561,7 @@ registerAppTool(
         .describe("可选：指定底层驱动（默认按用户配置的默认子代理模型自动选择）"),
       model: z.string().optional().describe("可选：本次运行指定的模型 ID（与并发其他会话零冲突）"),
       effort: z
-        .enum(["low", "medium", "high", "xhigh", "max"])
+        .enum(["off", "low", "medium", "high", "xhigh", "max"])
         .optional()
         .describe("可选：推理强度"),
       profile_id: z.string().optional().describe("可选：使用自定义上游模型预设 ID"),
@@ -1702,7 +1777,11 @@ server.registerTool(
     ];
     for (const d of drivers) {
       lines.push(`### ${d.label} (${d.id}) — ${d.installed ? "✅ 已就绪" : "⚪ 未安装"} (${d.detail})`);
-      if (d.models?.length) {
+      if (d.providers?.length) {
+        for (const p of d.providers) {
+          lines.push(`  - 上游 [${p.displayName || p.key}] (${p.source || "config"}, ${p.models.length} 模型): ${p.models.slice(0, 5).map((m) => `${p.key}/${m.id}`).join(", ")}${p.models.length > 5 ? " ..." : ""}`);
+        }
+      } else if (d.models?.length) {
         lines.push(d.models.slice(0, 12).map((m) => `  - ${m.id} (${m.name})`).join("\n"));
         if (d.models.length > 12) lines.push(`  ... 等共 ${d.models.length} 个模型`);
       }
@@ -1913,11 +1992,17 @@ registerAppTool(
     title: "管理 ALilaS 默认模型与自定义上游（App 内部）",
     description: "设置默认子代理引擎/模型，或增删自定义上游预设（仅存环境变量名，不存明文 Key）。",
     inputSchema: {
-      action: z.enum(["set_default", "upsert_profile", "delete_profile", "refresh_drivers"]),
+      action: z.enum(["set_default", "upsert_profile", "delete_profile", "refresh_drivers", "update_settings"]),
       driver: z.string().optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profile_id: z.string().optional(),
+      settings: z
+        .object({
+          idleTimeoutSec: z.number().int().min(60).max(600).optional(),
+          scanDshDesktop: z.boolean().optional(),
+        })
+        .optional(),
       profile: z
         .object({
           id: z.string().optional(),
@@ -1948,6 +2033,9 @@ registerAppTool(
       profileStore.upsertCustomProfile(args.profile);
     } else if (args.action === "delete_profile" && args.profile_id) {
       profileStore.deleteCustomProfile(args.profile_id);
+    } else if (args.action === "update_settings" && args.settings) {
+      profileStore.updateSettings(args.settings);
+      getDetectedDrivers(true);
     } else if (args.action === "refresh_drivers") {
       getDetectedDrivers(true);
     }

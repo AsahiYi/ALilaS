@@ -253,6 +253,12 @@ function createParserState(filePath) {
     lastTurnEnd: null,
     lastAssistantText: "",
     latestUsage: null,
+    stepStartTime: null,
+    lastStepDurationSec: 0,
+    lastTps: 0,
+    cumulativeTokens: 0,
+    cumulativeInputTokens: 0,
+    cumulativeCacheReadTokens: 0,
     cumulativeOutputTokens: 0,
     allItems: [],
     toolItemByCallId: new Map(),
@@ -292,6 +298,7 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     state.currentTurn = d.turn ?? state.currentTurn + 1;
   } else if (type === "step/start") {
     state.currentStep = d.step ?? state.currentStep + 1;
+    state.stepStartTime = time;
   } else if (type === "turn/end") {
     state.lastTurnEnd = { turn: d.turn ?? state.currentTurn, reason: d.reason || null };
     if (d.reason?.kind === "error") {
@@ -321,19 +328,32 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     }
   } else if (type === "assistant/message") {
     if (d.usage && typeof d.usage === "object") {
+      const inputTokens = d.usage.inputTokens ?? 0;
+      const outputTokens = d.usage.outputTokens ?? 0;
+      const cacheReadTokens = d.usage.cacheReadTokens ?? 0;
+      const cacheWriteTokens = d.usage.cacheWriteTokens ?? 0;
+      const reasoningTokens = d.usage.reasoningTokens ?? 0;
+      const totalTokens =
+        d.usage.totalTokens ?? inputTokens + cacheReadTokens + outputTokens;
       state.latestUsage = {
-        inputTokens: d.usage.inputTokens ?? 0,
-        outputTokens: d.usage.outputTokens ?? 0,
-        totalTokens:
-          d.usage.totalTokens ??
-          (d.usage.inputTokens ?? 0) +
-            (d.usage.cacheReadTokens ?? 0) +
-            (d.usage.outputTokens ?? 0),
-        cacheReadTokens: d.usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: d.usage.cacheWriteTokens ?? 0,
-        reasoningTokens: d.usage.reasoningTokens ?? 0,
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        reasoningTokens,
       };
-      state.cumulativeOutputTokens += d.usage.outputTokens ?? 0;
+      state.cumulativeTokens += totalTokens;
+      state.cumulativeInputTokens += inputTokens;
+      state.cumulativeCacheReadTokens += cacheReadTokens;
+      state.cumulativeOutputTokens += outputTokens;
+      if (time && state.stepStartTime && time > state.stepStartTime && outputTokens > 0) {
+        const durSec = (time - state.stepStartTime) / 1000;
+        state.lastStepDurationSec = Math.round(durSec * 10) / 10;
+        if (durSec >= 0.15) {
+          state.lastTps = Math.round(((outputTokens + reasoningTokens) / durSec) * 10) / 10;
+        }
+      }
     }
 
     const msg = d.message || d;
@@ -600,6 +620,11 @@ export function parseSessionFile(filePath, opts = {}) {
     frameCount: st.frameCount,
     tornTail: st.tornTail,
     usage: st.latestUsage,
+    lastTps: st.lastTps,
+    lastStepDurationSec: st.lastStepDurationSec,
+    cumulativeTokens: st.cumulativeTokens,
+    cumulativeInputTokens: st.cumulativeInputTokens,
+    cumulativeCacheReadTokens: st.cumulativeCacheReadTokens,
     cumulativeOutputTokens: st.cumulativeOutputTokens,
     stats: {
       totalEvents: st.totalEvents,
