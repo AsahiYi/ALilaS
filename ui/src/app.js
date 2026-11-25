@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.2.0" }, {});
+const app = new App({ name: "alilas", version: "3.2.1" }, {});
 
 const EFFORT_LABELS = {
   off: "关",
@@ -73,6 +73,7 @@ const state = {
   expandedProviders: new Set(),
   expandedProvidersSeeded: false,
   expandedModelRow: "",
+  openSettingsFolds: new Set(),
   // Timeline incremental rendering
   openDetails: new Set(),
   closedDetails: new Set(),
@@ -1264,8 +1265,8 @@ function renderSettingsView() {
   const defDisp = getSelectionDisplay(state.defaultSelection);
 
   const tabDefs = [
-    { id: "dsh", label: "DSH 上游", info: getDriverInfo("dsh") },
-    { id: "agy", label: "AGY 原生", info: getDriverInfo("agy") },
+    { id: "dsh", label: "DSH", info: getDriverInfo("dsh") },
+    { id: "agy", label: "AGY", info: getDriverInfo("agy") },
     { id: "claude", label: "Claude", info: getDriverInfo("claude") },
     { id: "codex", label: "Codex", info: getDriverInfo("codex") },
     { id: "custom", label: "自定义", info: { installed: state.customProfiles.length > 0 } },
@@ -1313,24 +1314,27 @@ function renderSettingsView() {
     : `<div class="muted" style="font-size:11px;">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>`;
 
   const readyCount = state.drivers.filter((d) => d.installed).length;
+  const isFoldOpen = (k) => (state.openSettingsFolds.has(k) ? "open" : "");
 
   return `
     <div class="dash-card">
       <div class="dash-head">
         <span>选择子代理模型与思考强度</span>
-        <span class="pill-badge">${escapeHtml(curDisp.name)}${curDisp.effort ? ` · ${escapeHtml(curDisp.effort)}` : ""}</span>
+        <span id="settings-cur-badge" class="pill-badge">${escapeHtml(curDisp.name)}${
+          curDisp.effort ? ` · ${escapeHtml(curDisp.effort)}` : ""
+        }</span>
       </div>
-      <div class="muted" style="font-size:11px;">
+      <div id="settings-def-line" class="muted" style="font-size:11px;">
         当前全局默认：<b>${escapeHtml(defDisp.name)}${defDisp.effort ? ` · ${escapeHtml(defDisp.effort)}` : ""}</b>（点击任意模型展开思考强度或「★ 设为默认」）
       </div>
       <input id="settings-model-search" class="search-input" value="${escapeHtml(
         state.modelSearch,
       )}" placeholder="搜索模型名或上游渠道…" autocomplete="off" />
-      <div class="engine-pills">${enginePillsHtml}</div>
+      <div id="settings-engine-pills" class="engine-pills">${enginePillsHtml}</div>
       <div id="settings-model-list" class="model-list">${buildSettingsModelListHtml()}</div>
     </div>
 
-    <details class="fold-card">
+    <details class="fold-card" data-fold="drivers" ${isFoldOpen("drivers")}>
       <summary>
         <span>引擎探测状态（${readyCount} / ${state.drivers.length} 就绪）</span>
         <span class="meta">展开 ▾</span>
@@ -1343,7 +1347,7 @@ function renderSettingsView() {
       </div>
     </details>
 
-    <details class="fold-card">
+    <details class="fold-card" data-fold="runtime" ${isFoldOpen("runtime")}>
       <summary>
         <span>运行与扫描设置</span>
         <span class="meta">阈值 ${state.settings.idleTimeoutSec || 180}s ▾</span>
@@ -1365,7 +1369,7 @@ function renderSettingsView() {
       </div>
     </details>
 
-    <details class="fold-card">
+    <details class="fold-card" data-fold="custom" ${isFoldOpen("custom")}>
       <summary>
         <span>自定义上游预设（${state.customProfiles.length}）</span>
         <span class="meta">展开 ▾</span>
@@ -1391,6 +1395,42 @@ function renderSettingsView() {
     </details>`;
 }
 
+function refreshSettingsModelSection() {
+  const listEl = $("settings-model-list");
+  if (!listEl) {
+    renderOverlayView(true);
+    return;
+  }
+  const savedScroll = listEl.scrollTop;
+  listEl.innerHTML = buildSettingsModelListHtml();
+  listEl.scrollTop = savedScroll;
+
+  const curDisp = getSelectionDisplay(state.selection);
+  const badge = $("settings-cur-badge");
+  if (badge) {
+    badge.textContent = `${curDisp.name}${curDisp.effort ? ` · ${curDisp.effort}` : ""}`;
+  }
+  const defDisp = getSelectionDisplay(state.defaultSelection);
+  const defLine = $("settings-def-line");
+  if (defLine) {
+    defLine.innerHTML = `当前全局默认：<b>${escapeHtml(defDisp.name)}${
+      defDisp.effort ? ` · ${escapeHtml(defDisp.effort)}` : ""
+    }</b>（点击任意模型展开思考强度或「★ 设为默认」）`;
+  }
+  const pillsEl = $("settings-engine-pills");
+  if (pillsEl) {
+    pillsEl.querySelectorAll("[data-eng-tab]").forEach((b) => {
+      b.classList.toggle("active", b.getAttribute("data-eng-tab") === state.settingsEngineTab);
+    });
+  }
+}
+
+const OV_ICONS = {
+  session: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="8" r="5.6" stroke-opacity="0.28"/><path d="M8 2.4A5.6 5.6 0 1 1 2.4 8" stroke-linecap="round"/></svg>`,
+  usage: `<svg viewBox="0 0 14 14" width="13" height="13" fill="currentColor"><rect x="1" y="7" width="2.4" height="6" rx="1"/><rect x="5.8" y="2" width="2.4" height="11" rx="1"/><rect x="10.6" y="4.5" width="2.4" height="8.5" rx="1"/></svg>`,
+  settings: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.3"/><path d="M8 1.6v1.3M8 13.1v1.3M1.6 8h1.3M13.1 8h1.3M3.5 3.5l.9.9M11.6 11.6l.9.9M12.5 3.5l-.9.9M4.4 11.6l-.9.9"/></svg>`,
+};
+
 function renderOverlayView(force = false) {
   const ov = $("overlay-view");
   ov.classList.toggle("open", Boolean(state.activeView));
@@ -1409,25 +1449,31 @@ function renderOverlayView(force = false) {
     return;
   }
 
+  const prevBodyScroll = bodyEl.scrollTop;
+  const prevListScroll = $("settings-model-list")?.scrollTop || 0;
+
   if (state.activeView === "session") {
     titleEl.innerHTML = `
-      <span class="ov-icon">◐</span>
+      <span class="ov-icon">${OV_ICONS.session}</span>
       <span>当前会话上下文</span>
       <span class="ov-sub">${escapeHtml(shortProjectName(state.session?.cwd, "") || "ALilaS")}</span>`;
     bodyEl.innerHTML = renderSessionContextView();
   } else if (state.activeView === "usage") {
     titleEl.innerHTML = `
-      <span class="ov-icon">ılı</span>
+      <span class="ov-icon">${OV_ICONS.usage}</span>
       <span>累计 Token 用量</span>
       <span class="ov-sub">历史 + 实时</span>`;
     bodyEl.innerHTML = renderLifetimeUsageView();
   } else if (state.activeView === "settings") {
     titleEl.innerHTML = `
-      <span class="ov-icon">⚙</span>
+      <span class="ov-icon">${OV_ICONS.settings}</span>
       <span>模型与设置</span>
-      <span class="ov-sub">v3.2.0</span>`;
+      <span class="ov-sub">v3.2.1</span>`;
     bodyEl.innerHTML = renderSettingsView();
+    const newList = $("settings-model-list");
+    if (newList) newList.scrollTop = prevListScroll;
   }
+  bodyEl.scrollTop = prevBodyScroll;
 }
 
 // ---------------------------------------------------------------- Timeline
@@ -1921,7 +1967,7 @@ async function pinDefaultModel({ driver = "", model = "", effort = "high", profi
     state.lastEtag = "";
     showToast("已设为全局默认子代理模型");
     renderModelCapsule();
-    if (state.activeView === "settings") renderOverlayView(true);
+    if (state.activeView === "settings") refreshSettingsModelSection();
   } catch (e) {
     showToast(`设置默认失败: ${e?.message || e}`);
   }
@@ -2008,7 +2054,20 @@ function bindEvents() {
     if (e.key === "Escape" && state.activeView) closeView();
   });
 
-  // Overlay interactions (Settings model picker, provider toggles, advanced settings)
+  // Overlay interactions (persist fold states, in-place model list updates)
+  $("ov-body").addEventListener(
+    "toggle",
+    (e) => {
+      const el = e.target;
+      if (el?.tagName === "DETAILS" && el.hasAttribute("data-fold")) {
+        const k = el.getAttribute("data-fold");
+        if (el.open) state.openSettingsFolds.add(k);
+        else state.openSettingsFolds.delete(k);
+      }
+    },
+    true,
+  );
+
   $("ov-body").addEventListener("input", (e) => {
     if (e.target?.id === "settings-model-search") {
       state.modelSearch = e.target.value || "";
@@ -2021,7 +2080,7 @@ function bindEvents() {
     const engBtn = e.target.closest("[data-eng-tab]");
     if (engBtn) {
       state.settingsEngineTab = engBtn.getAttribute("data-eng-tab") || "dsh";
-      renderOverlayView(true);
+      refreshSettingsModelSection();
       return;
     }
 
@@ -2072,7 +2131,7 @@ function bindEvents() {
         state.userTouchedModel = true;
         renderModelCapsule();
         showToast(`已切换: ${p.name}`);
-        renderOverlayView(true);
+        refreshSettingsModelSection();
       }
       return;
     }
@@ -2095,7 +2154,7 @@ function bindEvents() {
         const d = getSelectionDisplay();
         showToast(`已切换: ${d.name}${d.effort ? ` · ${d.effort}` : ""}`);
       }
-      renderOverlayView(true);
+      refreshSettingsModelSection();
       return;
     }
 

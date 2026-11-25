@@ -36,6 +36,7 @@ export function buildInvocation({
   sessionId,
   cwd,
   model,
+  effort,
   permissionMode = "auto",
   profile,
 }) {
@@ -54,6 +55,10 @@ export function buildInvocation({
   ];
   const targetModel = profile?.model || model;
   if (targetModel) args.push("--model", targetModel);
+  const targetEffort = effort || profile?.effort;
+  if (targetEffort && ["low", "medium", "high", "max"].includes(targetEffort)) {
+    args.push("--effort", targetEffort);
+  }
   if (sessionId) args.push("--resume", sessionId);
 
   const env = { ...process.env, PYTHONIOENCODING: "utf-8" };

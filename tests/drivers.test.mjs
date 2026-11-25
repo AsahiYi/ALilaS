@@ -152,6 +152,7 @@ test("codex driver parses exec --json thread, reasoning, command_execution, agen
   assert.equal(events.find((e) => e.type === "tool_start")?.toolName, "shell");
   assert.equal(events.find((e) => e.type === "tool_end")?.resultText, "clean");
   assert.equal(events.find((e) => e.type === "usage")?.usage.cacheReadTokens, 1000);
+  assert.equal(events.find((e) => e.type === "usage")?.usage.inputTokens, 200);
   assert.equal(events.find((e) => e.type === "final")?.text, "Repo is clean.");
 });
 
@@ -165,11 +166,20 @@ test("dsh driver filters child subagent streams and parses stream_probe stderr l
   parser.onStderrLine(
     `__LILAS_STREAM__${JSON.stringify({ type: "reasoning_delta", sessionId: "session-root", text: "ROOT_THOUGHT" })}`,
   );
+  // Both stream_probe and status report usage for step 1 — must deduplicate to 1 usage event
+  parser.onStdoutLine(JSON.stringify({ type: "status", phase: "step_start", turn: 1, step: 1 }));
+  parser.onStderrLine(
+    `__LILAS_STREAM__${JSON.stringify({ type: "usage", sessionId: "session-root", turn: 1, usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 } })}`,
+  );
+  parser.onStdoutLine(
+    JSON.stringify({ type: "status", phase: "step_end", turn: 1, step: 1, usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 } }),
+  );
   parser.onStdoutLine(JSON.stringify({ type: "final", text: "Finished" }));
 
   const deltas = events.filter((e) => e.type === "reasoning_delta");
   assert.equal(deltas.length, 1);
   assert.equal(deltas[0].text, "ROOT_THOUGHT");
+  assert.equal(events.filter((e) => e.type === "usage").length, 1);
   assert.equal(events.find((e) => e.type === "final")?.text, "Finished");
 });
 

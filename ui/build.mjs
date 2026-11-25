@@ -425,18 +425,19 @@ const html = `<!doctype html>
   .overlay-view.open { display: flex; }
   .ov-header {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 10px 13px; background: var(--bg-2); border-bottom: 1px solid var(--bd-1);
+    padding: 10px 14px; background: var(--bg-2); border-bottom: 1px solid var(--bd-1);
     flex-shrink: 0;
   }
   .ov-title {
-    display: inline-flex; align-items: center; gap: 7px;
+    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
     font-weight: 700; font-size: 13px; color: var(--fg-1);
   }
-  .ov-icon { color: var(--brand); display: inline-flex; align-items: center; }
-  .ov-sub { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); font-weight: 400; }
+  .ov-icon { color: var(--brand); display: inline-flex; align-items: center; flex-shrink: 0; }
+  .ov-sub { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* IMPORTANT: display:block (never flex-column) on scrollable container so Chromium never crushes child cards */
   .ov-body {
-    flex: 1; min-height: 0; overflow-y: auto; padding: 12px 13px 20px;
-    display: flex; flex-direction: column; gap: 11px;
+    flex: 1; min-height: 0; overflow-y: auto; padding: 12px 13px 22px;
+    display: block;
   }
 
   /* Refined Dashboard Cards */
@@ -444,13 +445,17 @@ const html = `<!doctype html>
     background: linear-gradient(155deg, var(--brand-glow) 0%, var(--bg-2) 60%);
     border: 1px solid var(--bd-1); border-radius: 12px;
     padding: 13px 14px; display: flex; flex-direction: column; gap: 10px;
+    margin-bottom: 11px;
   }
   .dash-card {
     background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: 11px;
     padding: 12px 13px; display: flex; flex-direction: column; gap: 10px;
+    margin-bottom: 11px;
   }
+  .hero-card > *, .dash-card > * { flex-shrink: 0; }
+  .ov-body > :last-child { margin-bottom: 0; }
   .dash-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
     font-size: 12px; font-weight: 600; color: var(--fg-1);
   }
   .dash-head-sub { font-size: 11px; color: var(--fg-3); font-weight: 400; font-family: var(--mono); }
@@ -470,7 +475,7 @@ const html = `<!doctype html>
   .pill-badge {
     font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
     background: var(--brand-soft); color: var(--brand-fg); font-weight: 600;
-    white-space: nowrap;
+    white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
   }
   .pill-badge.ok { background: rgba(52, 211, 153, 0.14); color: var(--success); }
   .pill-badge.warn { background: rgba(251, 191, 36, 0.16); color: var(--warn); }
@@ -531,7 +536,7 @@ const html = `<!doctype html>
   .heatmap-grid {
     display: grid;
     grid-template-columns: repeat(16, minmax(0, 1fr));
-    grid-template-rows: repeat(7, 1fr);
+    grid-template-rows: repeat(7, auto);
     grid-auto-flow: column;
     gap: 3px;
     width: 100%;
@@ -583,9 +588,9 @@ const html = `<!doctype html>
     display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
   }
   .eng-pill {
-    display: inline-flex; align-items: center; gap: 5px;
+    display: inline-flex; align-items: center; gap: 4px;
     background: var(--bg-1); border: 1px solid var(--bd-1); border-radius: 999px;
-    padding: 3px 10px; font-size: 11px; color: var(--fg-2); cursor: pointer;
+    padding: 3px 8px; font-size: 11px; color: var(--fg-2); cursor: pointer;
     transition: border-color 0.12s, background 0.12s, color 0.12s;
   }
   .eng-pill:hover { border-color: var(--brand); color: var(--fg-1); }
@@ -593,12 +598,15 @@ const html = `<!doctype html>
   .eng-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
   .eng-dot.off { background: var(--fg-3); opacity: 0.45; }
 
-  .model-list { display: flex; flex-direction: column; gap: 4px; max-height: 310px; overflow-y: auto; padding-right: 2px; }
+  /* display:block on scrollable model-list prevents Chromium flex-shrink crushing */
+  .model-list { display: block; max-height: 290px; overflow-y: auto; padding-right: 2px; }
   .pop-empty { padding: 16px 10px; text-align: center; color: var(--fg-3); font-size: 11.5px; }
 
   .pop-group {
     border: 1px solid var(--bd-2); border-radius: 8px; background: var(--bg-1); overflow: hidden;
+    margin-bottom: 5px;
   }
+  .pop-group:last-child { margin-bottom: 0; }
   .pop-group-head {
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
     width: 100%; background: transparent; border: 0; padding: 7px 9px;
@@ -609,9 +617,10 @@ const html = `<!doctype html>
   .pop-group-meta { font-size: 10px; color: var(--fg-3); font-weight: 400; display: inline-flex; align-items: center; gap: 5px; }
   .pop-badge { font-size: 9.5px; padding: 1px 5px; border-radius: 4px; background: var(--bg-3); color: var(--fg-3); }
   .pop-badge.plugin { background: var(--brand-soft); color: var(--brand-fg); }
-  .pop-group-list { border-top: 1px solid var(--bd-2); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .pop-group-list { border-top: 1px solid var(--bd-2); padding: 4px; display: block; }
 
-  .pop-row-wrap { border-radius: 7px; overflow: hidden; }
+  .pop-row-wrap { border-radius: 7px; overflow: hidden; margin-bottom: 3px; }
+  .pop-row-wrap:last-child { margin-bottom: 0; }
   .pop-row {
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
     width: 100%; background: transparent; border: 0; border-radius: 7px;
@@ -647,19 +656,22 @@ const html = `<!doctype html>
   .default-pin-btn.is-def { background: var(--brand-soft); color: var(--brand-fg); border-color: var(--brand); }
 
   details.fold-card {
+    display: block;
     background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: 10px; overflow: hidden;
+    margin-bottom: 9px;
   }
   details.fold-card > summary {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--fg-1);
-    cursor: pointer; user-select: none; list-style: none;
+    cursor: pointer; user-select: none; list-style: none; line-height: 1.4;
   }
   details.fold-card > summary::-webkit-details-marker { display: none; }
   details.fold-card > summary:hover { background: var(--surface-elev); }
   .fold-body {
     padding: 10px 12px 12px; border-top: 1px solid var(--bd-2);
-    display: flex; flex-direction: column; gap: 8px;
+    display: block;
   }
+  .fold-body > * + * { margin-top: 8px; }
 
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .form-grid input, .form-grid select, .setting-input {

@@ -191,7 +191,8 @@ export function parseProvidersFromYaml(text) {
       const ekv = trimmed.match(/^(off|low|medium|high|xhigh):\s*(.*)$/i);
       if (ekv) {
         const ek = ekv[1].toLowerCase();
-        if (ek !== "off" && !curModel._parsedEfforts.includes(ek)) {
+        const ev = ekv[2].trim().toLowerCase();
+        if (ek !== "off" && ev !== "null" && !curModel._parsedEfforts.includes(ek)) {
           curModel._parsedEfforts.push(ek);
         }
       }
@@ -475,7 +476,15 @@ export function createParser(emit) {
   let rootSessionId = null;
   let currentStep = 0;
   let stepStartAt = null;
+  const emittedUsageSteps = new Set();
   const openToolStarts = new Map();
+
+  function emitUsageOnce(stepKey, usage, durSec) {
+    if (!usage) return;
+    if (emittedUsageSteps.has(stepKey)) return;
+    emittedUsageSteps.add(stepKey);
+    emit({ type: "usage", usage, durationSec: durSec });
+  }
 
   function normUsage(u) {
     if (!u || typeof u !== "object") return null;
@@ -506,7 +515,7 @@ export function createParser(emit) {
         const usage = normUsage(ev.usage);
         if (usage) {
           const durSec = stepStartAt ? Math.max(0.1, (Date.now() - stepStartAt) / 1000) : null;
-          emit({ type: "usage", usage, durationSec: durSec });
+          emitUsageOnce(`${ev.turn || 1}:${currentStep}`, usage, durSec);
         }
         emit({
           type: "status",
@@ -577,7 +586,7 @@ export function createParser(emit) {
           } else if (ev.type === "usage" && ev.usage) {
             const usage = normUsage(ev.usage);
             const durSec = stepStartAt ? Math.max(0.1, (Date.now() - stepStartAt) / 1000) : null;
-            if (usage) emit({ type: "usage", usage, durationSec: durSec });
+            emitUsageOnce(`${ev.turn || 1}:${currentStep}`, usage, durSec);
           }
         } catch {
           // ignore

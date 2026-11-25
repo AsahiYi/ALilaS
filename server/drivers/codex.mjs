@@ -58,7 +58,7 @@ export function buildInvocation({
   const targetModel = profile?.model || model;
   if (targetModel) args.push("--model", targetModel);
   const targetEffort = effort || profile?.effort;
-  if (targetEffort && ["low", "medium", "high"].includes(targetEffort)) {
+  if (targetEffort && ["low", "medium", "high", "xhigh"].includes(targetEffort)) {
     args.push("-c", `model_reasoning_effort=${targetEffort}`);
   }
   args.push("-");
@@ -91,10 +91,11 @@ export function createParser(emit) {
 
   function normUsage(u) {
     if (!u || typeof u !== "object") return null;
-    const inputTokens = u.input_tokens ?? 0;
+    const rawInput = u.input_tokens ?? 0;
     const cached = u.cached_input_tokens ?? 0;
+    const inputTokens = Math.max(0, rawInput - cached);
     const outputTokens = u.output_tokens ?? 0;
-    const totalTokens = inputTokens + outputTokens;
+    const totalTokens = rawInput + outputTokens;
     return { inputTokens, outputTokens, thinkingTokens: 0, cacheReadTokens: cached, totalTokens };
   }
 
