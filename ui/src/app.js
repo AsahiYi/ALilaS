@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.2.1" }, {});
+const app = new App({ name: "alilas", version: "3.2.2" }, {});
 
 const EFFORT_LABELS = {
   off: "关",
@@ -87,6 +87,7 @@ const state = {
   canUpdateContext: false,
   canOpenLinks: false,
   errorMsg: "",
+  consecutivePollFailures: 0,
   toastTimer: null,
 };
 
@@ -1468,7 +1469,7 @@ function renderOverlayView(force = false) {
     titleEl.innerHTML = `
       <span class="ov-icon">${OV_ICONS.settings}</span>
       <span>模型与设置</span>
-      <span class="ov-sub">v3.2.1</span>`;
+      <span class="ov-sub">v3.2.2</span>`;
     bodyEl.innerHTML = renderSettingsView();
     const newList = $("settings-model-list");
     if (newList) newList.scrollTop = prevListScroll;
@@ -1646,6 +1647,21 @@ function buildLiveFooterHtml(run) {
       <div class="card card-error" id="live-stream-card">
         <div class="card-head"><span class="tag tag-err">运行异常</span></div>
         <pre class="card-body code-block">${escapeHtml(run.error)}</pre>
+      </div>`;
+  }
+  if (run?.status === "stopped") {
+    const reasonMap = {
+      stopped_by_user: "已由用户手动中止",
+      stopped_by_model: "已由主代理中止",
+    };
+    const reasonText = reasonMap[run.phase] || (run.phase ? `已中止：${run.phase}` : "任务已中止");
+    return `
+      <div class="card card-stopped" id="live-stream-card">
+        <div class="card-head">
+          <span class="tag tag-run">已中止</span>
+          <span class="meta">耗时 ${run.elapsedSec}s</span>
+        </div>
+        <div class="card-body muted">${escapeHtml(reasonText)}。可在下方继续输入指令续聊该会话。</div>
       </div>`;
   }
   return "";
@@ -1831,6 +1847,17 @@ function renderComposerState() {
   }
 }
 
+function renderErrorBanner() {
+  const errBar = $("error-banner");
+  if (!errBar) return;
+  if (state.errorMsg) {
+    errBar.textContent = state.errorMsg;
+    errBar.style.display = "block";
+  } else {
+    errBar.style.display = "none";
+  }
+}
+
 function renderAll(forceFullTimeline = false) {
   syncInitialSelection();
   renderStatus();
@@ -1841,15 +1868,7 @@ function renderAll(forceFullTimeline = false) {
   renderModelCapsule();
   if (state.activeView) renderOverlayView(false);
   renderComposerState();
-
-  const errBar = $("error-banner");
-  if (state.errorMsg) {
-    errBar.textContent = state.errorMsg;
-    errBar.style.display = "block";
-  } else {
-    errBar.style.display = "none";
-  }
-
+  renderErrorBanner();
   renderTimeline(forceFullTimeline);
 }
 
@@ -1874,6 +1893,7 @@ async function pollState(force = false) {
     });
     const snap = res?.structuredContent;
     if (snap) {
+      state.consecutivePollFailures = 0;
       state.errorMsg = "";
       state.lastEtag = snap.etag || "";
       state.activeRun = snap.activeRun || null;
@@ -1882,6 +1902,7 @@ async function pollState(force = false) {
       if (snap.settings) state.settings = snap.settings;
 
       if (snap.unchanged) {
+        renderErrorBanner();
         renderStatus();
         renderAgentChips();
         renderStats();
@@ -1911,8 +1932,15 @@ async function pollState(force = false) {
       }
     }
   } catch (e) {
-    state.errorMsg = `同步失败: ${e?.message || String(e)}`;
-    renderAll(false);
+    state.consecutivePollFailures++;
+    const rawMsg = e?.message || String(e);
+    const isTransport = /failed to fetch|network|aborted|timeout|mcp error 2/i.test(rawMsg);
+    if (!isTransport || state.consecutivePollFailures >= 2) {
+      state.errorMsg = isTransport
+        ? "宿主连接暂时中断，正在自动重连…（若持续未恢复请点 ↻ 或重开 ALilaS 标签页）"
+        : `同步失败: ${rawMsg}`;
+      renderErrorBanner();
+    }
   } finally {
     state.polling = false;
     scheduleNextPoll();
@@ -1921,6 +1949,11 @@ async function pollState(force = false) {
 
 function scheduleNextPoll() {
   if (state.pollTimer) clearTimeout(state.pollTimer);
+  if (state.consecutivePollFailures >= 2) {
+    const backoff = Math.min(15000, 4000 * Math.pow(2, state.consecutivePollFailures - 2));
+    state.pollTimer = setTimeout(() => pollState(false), backoff);
+    return;
+  }
   const hasLiveStream = Boolean(state.activeRun?.live?.active);
   const running = anyActiveRun();
   const delay = hasLiveStream ? 650 : running ? 1300 : 4000;
@@ -2373,6 +2406,7 @@ function bindEvents() {
   });
 
   $("btn-refresh").addEventListener("click", () => {
+    state.consecutivePollFailures = 0;
     state.lastEtag = "";
     pollState(true);
   });

@@ -1629,7 +1629,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.2.1",
+  version: "3.2.2",
 });
 
 registerAppResource(
@@ -1716,7 +1716,7 @@ registerAppTool(
   {
     title: "派活给 ALilaS",
     description:
-      "以无头子代理模式异步启动 ALilaS 执行任务，支持 agy（Antigravity 原生模型）/ dsh（DeepSeek Harness & 自定义上游）/ claude / codex 四个引擎，每次运行独立传参零冲突，默认不限总时长并启用 180s 无活动看门狗。",
+      "以无头子代理模式异步启动 ALilaS 执行任务，支持 agy（Antigravity 原生模型）/ dsh（DeepSeek Harness & 自定义上游）/ claude / codex 四个引擎，每次运行独立传参零冲突，默认不限总时长并启用 180s 静默异常自动检测。",
     inputSchema: {
       task: z.string().min(1).describe("任务说明书（背景、目标文件绝对路径、允许/禁止边界、验收标准）"),
       session_id: z.string().optional().describe("可选：复用已有会话 ID；新主题留空"),

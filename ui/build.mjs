@@ -276,6 +276,7 @@ const html = `<!doctype html>
   .card-tool { border-left: 2.5px solid var(--bd-1); background: var(--bg-1); }
   .card-tool.is-running { border-left-color: var(--warn); }
   .card-tool.is-err, .card-error { border-left: 2.5px solid var(--danger); }
+  .card-stopped { border-left: 2.5px solid var(--warn); background: var(--bg-2); }
   .card-live { border-color: var(--brand); background: var(--bg-2); }
 
   .card-head {
