@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex-34D399?style=flat-square" alt="4 Drivers" />
   <img src="https://img.shields.io/badge/MCP%20Apps-SEP--1865-60A5FA?style=flat-square" alt="MCP App" />
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22.15-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/Version-3.2.2-A78BFA?style=flat-square" alt="v3.2.2" />
+  <img src="https://img.shields.io/badge/Version-3.2.3-A78BFA?style=flat-square" alt="v3.2.3" />
   <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
 </p>
 

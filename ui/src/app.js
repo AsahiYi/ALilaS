@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.2.2" }, {});
+const app = new App({ name: "alilas", version: "3.2.3" }, {});
 
 const EFFORT_LABELS = {
   off: "关",
@@ -88,6 +88,8 @@ const state = {
   canOpenLinks: false,
   errorMsg: "",
   consecutivePollFailures: 0,
+  isInline: false,
+  lastInlineHeight: 0,
   toastTimer: null,
 };
 
@@ -1858,6 +1860,200 @@ function renderErrorBanner() {
   }
 }
 
+function formatCompactModelName(rawModel, effort) {
+  let m = String(rawModel || "").trim();
+  if (m.includes("/")) m = m.split("/").slice(1).join("/");
+  if (m.includes(":")) m = m.split(":").slice(1).join(":");
+  if (!m) {
+    const disp = getSelectionDisplay();
+    m = disp.name || "";
+    if (!effort && disp.effort) effort = disp.effort;
+  }
+  const eff = effort && EFFORT_LABELS[effort] ? effort : "";
+  return m ? (eff ? `${m} · ${eff}` : m) : "";
+}
+
+function syncInlineCardHeight() {
+  if (!state.isInline) return;
+  requestAnimationFrame(() => {
+    const card = $("inline-card");
+    if (!card) return;
+    const h = Math.ceil(card.getBoundingClientRect().height) + 4;
+    if (h > 40 && Math.abs(h - state.lastInlineHeight) >= 2) {
+      state.lastInlineHeight = h;
+      try {
+        if (typeof app.sendSizeChanged === "function") {
+          app.sendSizeChanged({ height: h });
+        }
+      } catch {
+        // ignore if host ignores size notifications
+      }
+    }
+  });
+}
+
+function renderInlineCard() {
+  if (!state.isInline) return;
+  const card = $("inline-card");
+  if (!card) return;
+  const s = state.session;
+  const run = state.activeRun;
+  const running = isRunningStatus(run);
+
+  // Driver & model
+  const drv = shortDriverTag(run?.driver || s?.driver || state.selection.driver || "ALilaS");
+  $("ic-driver").textContent = drv;
+  const modelText = formatCompactModelName(run?.model || s?.model, run?.effort || s?.effort);
+  $("ic-model").textContent = modelText;
+  $("ic-model").title = modelText;
+
+  // Status pill & card top accent
+  const statusWrap = $("ic-status");
+  const dot = $("ic-dot");
+  const statusText = $("ic-status-text");
+  const stopBtn = $("ic-btn-stop");
+
+  card.classList.toggle("is-running", running);
+  card.classList.toggle(
+    "is-error",
+    run?.status === "error" || run?.status === "timeout",
+  );
+
+  let phaseDesc = "";
+  if (running) {
+    stopBtn.style.display = "inline-flex";
+    if (run.stalled) {
+      statusWrap.className = "ic-status stalled";
+      dot.className = "dot stalled";
+      statusText.textContent = `静默 ${run.idleSec}s`;
+      phaseDesc = `疑似无响应 · 静默 ${run.idleSec}s`;
+    } else {
+      statusWrap.className = "ic-status running";
+      dot.className = "dot running";
+      const phaseMap = {
+        booting: "启动中",
+        session_ready: "就绪",
+        turn_start: "开始",
+        step_start: "推理中",
+        thinking: "思考中",
+        writing: "回复中",
+      };
+      const p = run.phase?.startsWith("tool:")
+        ? `执行 ${run.phase.slice(5)}`
+        : phaseMap[run.phase] || "运行中";
+      statusText.textContent = `${p} · S${run.step || 1} · ${run.elapsedSec}s`;
+      phaseDesc = run.phase?.startsWith("tool:")
+        ? `⚡ 正在执行 ${run.phase.slice(5)}`
+        : `✦ ${p} · 右侧面板查看实时思维链`;
+    }
+  } else {
+    stopBtn.style.display = "none";
+    if (run?.status === "error" || run?.status === "timeout") {
+      statusWrap.className = "ic-status error";
+      dot.className = "dot error";
+      statusText.textContent =
+        run.status === "timeout" ? `超时 · ${run.elapsedSec}s` : `异常 · ${run.elapsedSec}s`;
+    } else if (run?.status === "stopped") {
+      statusWrap.className = "ic-status";
+      dot.className = "dot idle";
+      statusText.textContent = `已停止 · ${run.elapsedSec}s`;
+    } else if (run?.status === "done") {
+      statusWrap.className = "ic-status done";
+      dot.className = "dot done";
+      statusText.textContent = `完成 · ${run.elapsedSec}s`;
+    } else if (s) {
+      statusWrap.className = "ic-status";
+      dot.className = "dot idle";
+      statusText.textContent = formatTime(s.mtimeMs) || "历史";
+    } else {
+      statusWrap.className = "ic-status";
+      dot.className = "dot idle";
+      statusText.textContent = "待命";
+    }
+  }
+
+  // Project & session title
+  const projEl = $("ic-proj");
+  const titleEl = $("ic-title");
+  const proj = shortProjectName(run?.cwd || s?.cwd || state.scopeCwd, s?.workspaceSlug || "");
+  if (proj) {
+    projEl.textContent = proj;
+    projEl.title = run?.cwd || s?.cwd || state.scopeCwd || proj;
+    projEl.style.display = "inline-flex";
+  } else {
+    projEl.style.display = "none";
+  }
+  const curMeta = state.sessions.find((x) => x.sessionId === state.selectedSessionId);
+  const title =
+    curMeta?.alias ||
+    s?.alias ||
+    s?.title ||
+    run?.taskPreview ||
+    (state.selectedSessionId ? state.selectedSessionId : "右侧 ALilaS 面板查看完整会话");
+  titleEl.textContent = title;
+  titleEl.title = title;
+
+  // Footer left: inline warning OR live phase OR crisp counters
+  const footLeft = $("ic-foot-left");
+  const st = s?.stats || {};
+  if (state.errorMsg) {
+    footLeft.innerHTML = `<span class="ic-err-inline" title="${escapeHtml(
+      state.errorMsg,
+    )}">⚠ ${escapeHtml(state.errorMsg)}</span>`;
+  } else if (running && phaseDesc) {
+    footLeft.innerHTML = `<span class="ic-live-phase">${escapeHtml(phaseDesc)}</span>`;
+  } else if (s) {
+    footLeft.innerHTML = `<span class="ic-counts"><span>思<b>${
+      st.reasoningCount ?? 0
+    }</b></span><span>工<b>${st.toolCallCount ?? 0}</b></span><span>回<b>${
+      st.textCount ?? 0
+    }</b></span></span>`;
+  } else {
+    footLeft.innerHTML = `<span class="ic-counts">ALilaS 就绪 · 右侧面板查看详情</span>`;
+  }
+
+  // Footer right: minimalist 3-metric telemetry
+  const usage = run?.usage || s?.usage || null;
+  const cw = run?.contextWindow || s?.contextWindow || 1_000_000;
+  const used = usage?.totalTokens || 0;
+  const pct = used > 0 ? Math.min(100, (used / cw) * 100) : 0;
+  const pctLabel = pct >= 10 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`;
+  const ringTone = pct >= 85 ? "danger" : pct >= 70 ? "warn" : "";
+  const circumference = 37.7;
+  const dash = ((pct / 100) * circumference).toFixed(2);
+  const tps = run?.tps || s?.lastTps || state.telemetry?.lastTps || 0;
+  const tpsLabel = tps > 0 ? `${tps.toFixed(1)} tok/s` : "-- tok/s";
+  const totalBurned = Math.max(
+    state.telemetry?.allTimeTokens || 0,
+    s?.cumulativeTokens || 0,
+    run?.cumulativeTokens || 0,
+    used,
+  );
+
+  $("ic-tel").innerHTML = `
+    <span class="ic-tel-item ${ringTone}" title="上下文窗口占用">
+      <svg viewBox="0 0 16 16" width="12" height="12">
+        <circle class="ring-track" cx="8" cy="8" r="6" />
+        <circle class="ring-fill" cx="8" cy="8" r="6" stroke-dasharray="${dash} ${circumference}" transform="rotate(-90 8 8)" />
+      </svg>
+      <span>${used ? pctLabel : "0%"}</span>
+    </span>
+    <span class="ic-tel-item" title="当前生成速率">
+      <span style="color:var(--brand)">★</span>
+      <span>${tpsLabel}</span>
+    </span>
+    <span class="ic-tel-item" title="跨会话累计用量">
+      <svg class="bars-svg" viewBox="0 0 14 14" width="10" height="10">
+        <rect x="1" y="7" width="2.4" height="6" rx="1" />
+        <rect x="5.8" y="2" width="2.4" height="11" rx="1" />
+        <rect x="10.6" y="4.5" width="2.4" height="8.5" rx="1" />
+      </svg>
+      <span>${formatTokens(totalBurned)}</span>
+    </span>`;
+
+  syncInlineCardHeight();
+}
+
 function renderAll(forceFullTimeline = false) {
   syncInitialSelection();
   renderStatus();
@@ -1870,6 +2066,7 @@ function renderAll(forceFullTimeline = false) {
   renderComposerState();
   renderErrorBanner();
   renderTimeline(forceFullTimeline);
+  renderInlineCard();
 }
 
 // ---------------------------------------------------------------- Polling
@@ -1906,6 +2103,7 @@ async function pollState(force = false) {
         renderStatus();
         renderAgentChips();
         renderStats();
+        renderInlineCard();
         if (state.activeView && state.activeView !== "settings") {
           renderOverlayView(false);
         }
@@ -1940,6 +2138,7 @@ async function pollState(force = false) {
         ? "宿主连接暂时中断，正在自动重连…（若持续未恢复请点 ↻ 或重开 ALilaS 标签页）"
         : `同步失败: ${rawMsg}`;
       renderErrorBanner();
+      renderInlineCard();
     }
   } finally {
     state.polling = false;
@@ -2405,11 +2604,13 @@ function bindEvents() {
     pollState(true);
   });
 
-  $("btn-refresh").addEventListener("click", () => {
+  function doManualRefresh() {
     state.consecutivePollFailures = 0;
     state.lastEtag = "";
     pollState(true);
-  });
+  }
+  $("btn-refresh").addEventListener("click", doManualRefresh);
+  $("ic-btn-refresh").addEventListener("click", doManualRefresh);
 
   $("btn-toggle-reason").addEventListener("click", () => {
     state.expandAllReasoning = !state.expandAllReasoning;
@@ -2427,7 +2628,7 @@ function bindEvents() {
     renderAll(true);
   });
 
-  $("btn-stop").addEventListener("click", async () => {
+  async function doStopTask() {
     if (!state.activeRun?.runId) return;
     try {
       await app.callServerTool({
@@ -2441,7 +2642,9 @@ function bindEvents() {
       state.errorMsg = `停止失败: ${e?.message || e}`;
       renderAll(false);
     }
-  });
+  }
+  $("btn-stop").addEventListener("click", doStopTask);
+  $("ic-btn-stop").addEventListener("click", doStopTask);
 
   $("btn-perm-mode").addEventListener("click", () => {
     state.permissionMode = state.permissionMode === "auto" ? "readonly" : "auto";
@@ -2528,6 +2731,20 @@ function bindEvents() {
 
 // ---------------------------------------------------------------- MCP App Lifecycle
 
+function updateSurfaceMode(ctx) {
+  const maxH = ctx?.containerDimensions?.maxHeight;
+  const hasInlineCap = typeof maxH === "number" && maxH > 0;
+  // Antigravity sets containerDimensions.maxHeight ONLY on inline conversation cards.
+  // Side pane & global views fill their full pane and omit maxHeight.
+  const isInline = hasInlineCap || (window.innerHeight > 0 && window.innerHeight <= 260);
+  if (state.isInline !== isInline) {
+    state.isInline = isInline;
+    state.lastInlineHeight = 0;
+    document.documentElement.classList.toggle("is-inline", isInline);
+    if (isInline) renderInlineCard();
+  }
+}
+
 function applyTheme(ctx) {
   if (ctx?.theme) {
     applyDocumentTheme(ctx.theme);
@@ -2536,6 +2753,7 @@ function applyTheme(ctx) {
   if (ctx?.styles?.variables) {
     applyHostStyleVariables(ctx.styles.variables);
   }
+  updateSurfaceMode(ctx);
 }
 
 app.ontoolinput = ({ arguments: args }) => {
@@ -2565,6 +2783,13 @@ app.onhostcontextchanged = (ctx) => applyTheme(ctx);
 
 async function init() {
   bindEvents();
+  window.addEventListener("resize", () => {
+    try {
+      updateSurfaceMode(app.getHostContext());
+    } catch {
+      updateSurfaceMode(null);
+    }
+  });
   await app.connect();
   applyTheme(app.getHostContext());
   const caps = app.getHostCapabilities();

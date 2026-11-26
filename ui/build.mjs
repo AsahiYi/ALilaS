@@ -692,10 +692,293 @@ const html = `<!doctype html>
     opacity: 0; pointer-events: none; transition: opacity 0.16s, transform 0.16s; z-index: 60;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Compact Luxury Inline Card (conversation stream only; side pane & global untouched) */
+  .inline-card { display: none; }
+  html.is-inline,
+  html.is-inline body {
+    height: auto;
+    min-height: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+  html.is-inline .app-shell {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    background: transparent;
+  }
+  html.is-inline .header,
+  html.is-inline .manage-bar,
+  html.is-inline .agents-bar,
+  html.is-inline .stats-bar,
+  html.is-inline .error-banner,
+  html.is-inline .timeline,
+  html.is-inline .composer,
+  html.is-inline .overlay-view,
+  html.is-inline .toast {
+    display: none !important;
+  }
+  html.is-inline .inline-card {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    position: relative;
+    overflow: hidden;
+    padding: 12px 14px 11px;
+    border-radius: 12px;
+    border: 1px solid var(--bd-1);
+    background:
+      radial-gradient(circle at 0% 0%, var(--brand-glow), transparent 56%),
+      linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 100%);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  }
+  html.is-inline .inline-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1.5px;
+    background: linear-gradient(90deg, var(--brand) 0%, rgba(167, 139, 250, 0.22) 55%, transparent 100%);
+    opacity: 0.7;
+    pointer-events: none;
+  }
+  html.is-inline .inline-card.is-running::before {
+    background: linear-gradient(90deg, var(--brand) 0%, var(--success) 52%, transparent 100%);
+    opacity: 0.95;
+  }
+  html.is-inline .inline-card.is-error::before {
+    background: linear-gradient(90deg, var(--danger) 0%, rgba(248, 113, 113, 0.2) 60%, transparent 100%);
+    opacity: 0.9;
+  }
+  .ic-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+  .ic-id {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .ic-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    font-size: 13.5px;
+    letter-spacing: 0.015em;
+    color: var(--fg-1);
+    flex-shrink: 0;
+  }
+  .ic-driver {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: var(--brand-soft);
+    color: var(--brand-fg);
+    border: 1px solid rgba(167, 139, 250, 0.28);
+    flex-shrink: 0;
+  }
+  .ic-model {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--fg-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .ic-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .ic-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface-elev);
+    border: 1px solid var(--bd-1);
+    color: var(--fg-2);
+    white-space: nowrap;
+  }
+  .ic-status.running {
+    background: rgba(52, 211, 153, 0.10);
+    border-color: rgba(52, 211, 153, 0.30);
+    color: var(--success);
+  }
+  .ic-status.done {
+    background: rgba(52, 211, 153, 0.07);
+    border-color: rgba(52, 211, 153, 0.22);
+    color: var(--fg-1);
+  }
+  .ic-status.stalled {
+    background: rgba(251, 191, 36, 0.10);
+    border-color: rgba(251, 191, 36, 0.32);
+    color: var(--warn);
+  }
+  .ic-status.error {
+    background: rgba(248, 113, 113, 0.10);
+    border-color: rgba(248, 113, 113, 0.32);
+    color: var(--danger);
+  }
+  .ic-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 6px;
+    border: 1px solid var(--bd-1);
+    background: transparent;
+    color: var(--fg-2);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .ic-btn:hover { background: var(--bg-3); color: var(--fg-1); }
+  .ic-btn.danger {
+    color: var(--danger);
+    border-color: rgba(248, 113, 113, 0.42);
+  }
+  .ic-btn.danger:hover { background: rgba(248, 113, 113, 0.14); }
+  .ic-btn.icon-only { width: 24px; padding: 0; font-size: 12px; }
+
+  .ic-mid {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .ic-proj {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--fg-2);
+    background: var(--surface-soft);
+    border: 1px solid var(--bd-2);
+    border-radius: 5px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+  }
+  .ic-title {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--fg-1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .ic-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--bd-2);
+    font-size: 11px;
+    color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .ic-foot-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .ic-counts {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .ic-counts b { color: var(--fg-2); font-weight: 600; margin-left: 2px; }
+  .ic-live-phase {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--brand-fg);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ic-err-inline {
+    color: var(--warn);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ic-tel {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    color: var(--fg-2);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .ic-tel-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .ic-tel-item.warn { color: var(--warn); }
+  .ic-tel-item.danger { color: var(--danger); }
+  .ic-tel-item .ring-track { fill: none; stroke: var(--bd-1); stroke-width: 2.1; }
+  .ic-tel-item .ring-fill { fill: none; stroke: var(--fg-1); stroke-width: 2.1; stroke-linecap: round; }
+  .ic-tel-item.warn .ring-fill { stroke: var(--warn); }
+  .ic-tel-item.danger .ring-fill { stroke: var(--danger); }
+  .ic-tel-item .bars-svg { fill: var(--brand); }
 </style>
 </head>
 <body>
 <div class="app-shell">
+  <div id="inline-card" class="inline-card" aria-label="ALilaS 实时状态卡">
+    <div class="ic-top">
+      <div class="ic-id">
+        <span class="ic-brand">
+          ${logoDataUri ? `<img class="brand-icon" src="${logoDataUri}" alt="ALilaS" />` : ""}
+          ALilaS
+        </span>
+        <span id="ic-driver" class="ic-driver">ALilaS</span>
+        <span id="ic-model" class="ic-model"></span>
+      </div>
+      <div class="ic-right">
+        <span id="ic-status" class="ic-status">
+          <span id="ic-dot" class="dot idle"></span>
+          <span id="ic-status-text">加载中…</span>
+        </span>
+        <button id="ic-btn-stop" type="button" class="ic-btn danger" style="display:none;">停止</button>
+        <button id="ic-btn-refresh" type="button" class="ic-btn icon-only" title="刷新">↻</button>
+      </div>
+    </div>
+    <div class="ic-mid">
+      <span id="ic-proj" class="ic-proj" style="display:none;"></span>
+      <span id="ic-title" class="ic-title">等待子代理会话…</span>
+    </div>
+    <div class="ic-foot">
+      <div id="ic-foot-left" class="ic-foot-left"></div>
+      <div id="ic-tel" class="ic-tel"></div>
+    </div>
+  </div>
   <div class="header">
     <div class="header-row">
       <div class="brand-wrap">

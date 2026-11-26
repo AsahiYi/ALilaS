@@ -1629,7 +1629,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.2.2",
+  version: "3.2.3",
 });
 
 registerAppResource(
