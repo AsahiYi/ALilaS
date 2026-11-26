@@ -863,6 +863,9 @@ const html = `<!doctype html>
     gap: 8px;
     min-width: 0;
   }
+  .ic-mid.expanded {
+    align-items: flex-start;
+  }
   .ic-proj {
     display: inline-flex;
     align-items: center;
@@ -875,8 +878,28 @@ const html = `<!doctype html>
     border-radius: 5px;
     padding: 1px 6px;
     flex-shrink: 0;
+    margin-top: 1px;
   }
+  .ic-title-btn {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    padding: 2px 5px;
+    margin: -2px -5px;
+    border-radius: 6px;
+    text-align: left;
+    cursor: pointer;
+    font-family: var(--font);
+    transition: background 0.12s;
+  }
+  .ic-title-btn:hover { background: var(--surface-elev); }
+  .ic-mid.expanded .ic-title-btn { align-items: flex-start; }
   .ic-title {
+    flex: 1;
     font-size: 12.5px;
     font-weight: 500;
     color: var(--fg-1);
@@ -884,6 +907,33 @@ const html = `<!doctype html>
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+  }
+  .ic-mid.expanded .ic-title {
+    white-space: normal;
+    word-break: break-word;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.48;
+  }
+  .ic-title-caret {
+    font-size: 10px;
+    color: var(--fg-3);
+    flex-shrink: 0;
+    opacity: 0;
+    transition: transform 0.15s, opacity 0.12s, color 0.12s;
+  }
+  .ic-title-btn.can-expand .ic-title-caret,
+  .ic-mid.expanded .ic-title-caret {
+    opacity: 0.9;
+  }
+  .ic-title-btn:hover .ic-title-caret {
+    opacity: 1;
+    color: var(--fg-1);
+  }
+  .ic-mid.expanded .ic-title-caret {
+    transform: rotate(180deg);
+    color: var(--brand);
+    margin-top: 2px;
   }
   .ic-foot {
     display: flex;
@@ -970,9 +1020,12 @@ const html = `<!doctype html>
         <button id="ic-btn-refresh" type="button" class="ic-btn icon-only" title="刷新">↻</button>
       </div>
     </div>
-    <div class="ic-mid">
+    <div id="ic-mid" class="ic-mid">
       <span id="ic-proj" class="ic-proj" style="display:none;"></span>
-      <span id="ic-title" class="ic-title">等待子代理会话…</span>
+      <button id="ic-title-btn" type="button" class="ic-title-btn" aria-expanded="false" title="点击展开 / 收起完整标题">
+        <span id="ic-title" class="ic-title">等待子代理会话…</span>
+        <span id="ic-title-caret" class="ic-title-caret">▾</span>
+      </button>
     </div>
     <div class="ic-foot">
       <div id="ic-foot-left" class="ic-foot-left"></div>

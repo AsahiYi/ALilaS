@@ -51,6 +51,18 @@ function normalizeCwd(p) {
   }
 }
 
+function extractTaskTitle(task, maxLen = 140) {
+  const lines = String(task || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const meaningful =
+    lines.find((l) => !/^you are an authorized headless execution subagent/i.test(l)) ||
+    lines[0] ||
+    "";
+  return meaningful.length > maxLen ? meaningful.slice(0, maxLen) + "…" : meaningful;
+}
+
 function summarizeArgs(rawArgs) {
   if (rawArgs === undefined || rawArgs === null) return "";
   if (typeof rawArgs === "string") return rawArgs.replace(/\s+/g, " ").slice(0, 92);
@@ -606,7 +618,7 @@ function launchSubagentRun({
         effort: run.effort,
         cwd: run.cwd,
         contextWindow: run.contextWindow,
-        title: run.task.replace(/\s+/g, " ").slice(0, 48),
+        title: extractTaskTitle(run.task, 140),
       });
       run.timelineDoc.turns = (run.timelineDoc.turns || 0) + 1;
       run.turn = run.timelineDoc.turns;
@@ -1190,7 +1202,7 @@ function loadSessionView(sessionId, maxItems = 180) {
       model: run.model,
       effort: run.effort,
       contextWindow: run.contextWindow,
-      title: run.task.slice(0, 48),
+      title: extractTaskTitle(run.task, 140),
       alias: meta.alias || "",
       pinned: Boolean(meta.pinned),
       hidden: Boolean(meta.hidden),
@@ -1294,7 +1306,7 @@ function listAllUnifiedSessions({
         effort: r.effort,
         contextWindow: r.contextWindow,
         workspaceSlug: cwdToWorkspaceSlug(r.cwd),
-        title: r.task.slice(0, 48),
+        title: extractTaskTitle(r.task, 140),
         alias: meta.alias || "",
         pinned: Boolean(meta.pinned),
         hidden: Boolean(meta.hidden),
@@ -1629,7 +1641,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.2.3",
+  version: "3.2.4",
 });
 
 registerAppResource(

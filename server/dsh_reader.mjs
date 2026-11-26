@@ -152,6 +152,19 @@ function isNoiseUserPrompt(text) {
   return false;
 }
 
+function extractFirstPromptLine(text, maxLen = 160) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  // Skip boilerplate headless authorization preamble so the real task title surfaces
+  const meaningful =
+    lines.find((l) => !/^you are an authorized headless execution subagent/i.test(l)) ||
+    lines[0] ||
+    "";
+  return meaningful.length > maxLen ? meaningful.slice(0, maxLen) + "…" : meaningful;
+}
+
 function parseArgsObject(raw) {
   if (raw === undefined || raw === null) return null;
   if (typeof raw === "object") return raw;
@@ -239,6 +252,8 @@ function createParserState(filePath) {
     cwd: "",
     createdAt: null,
     title: "",
+    titleIsFallback: false,
+    firstPromptLine: "",
     agentPreset: null,
     origin: null,
     parentSession: null,
@@ -293,8 +308,16 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
   } else if (type === "agent-preset/selected") {
     if (d.agentPreset) state.agentPreset = d.agentPreset;
   } else if (type === "session/title") {
-    if (typeof d.title === "string" && d.title.trim()) {
-      state.title = d.title.trim();
+    const rawTitle = typeof d.title === "string" ? d.title.trim() : "";
+    const isFallback = d.source?.kind === "fallback";
+    if (rawTitle) {
+      if (isFallback && state.firstPromptLine && state.firstPromptLine.length > rawTitle.length) {
+        state.title = state.firstPromptLine;
+        state.titleIsFallback = true;
+      } else {
+        state.title = rawTitle;
+        state.titleIsFallback = isFallback;
+      }
     }
   } else if (type === "turn/start") {
     state.currentTurn = d.turn ?? state.currentTurn + 1;
@@ -317,7 +340,15 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     const msg = d.message || d;
     const text = extractTextFromContent(msg.content);
     if (!isNoiseUserPrompt(text)) {
-      if (!state.title) state.title = text.replace(/\s+/g, " ").slice(0, 48);
+      if (!state.firstPromptLine) {
+        const firstLine = extractFirstPromptLine(text, 160);
+        if (firstLine) {
+          state.firstPromptLine = firstLine;
+          if (!state.title || (state.titleIsFallback && firstLine.length > state.title.length)) {
+            state.title = firstLine;
+          }
+        }
+      }
       state.allItems.push({
         kind: "user",
         seq,

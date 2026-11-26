@@ -10,6 +10,8 @@ import * as codex from "../server/drivers/codex.mjs";
 import * as dsh from "../server/drivers/dsh.mjs";
 import { createProfileStore } from "../server/profiles.mjs";
 import { createTimelineStore } from "../server/timeline_store.mjs";
+import { parseSessionFile } from "../server/dsh_reader.mjs";
+import zlib from "node:zlib";
 
 test("agy driver parses real stream-json NDJSON events accurately", () => {
   const events = [];
@@ -274,4 +276,32 @@ test("dsh parseProvidersFromYaml extracts multi-provider models, efforts, and ap
   assert.equal(providers[1].key, "claude-b");
   assert.equal(providers[1].api, "anthropic-messages");
   assert.equal(providers[1].models[0].name, "Claude Sonnet 4.6");
+});
+
+test("dsh_reader preserves full first prompt line instead of DSH truncated fallback title", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alilas-dsh-title-"));
+  try {
+    const fp = path.join(tmp, "session.v4.jsonl.zstd");
+    const fullFirstLine = "【ExampleApp · 双模块对比样板：精准修图 + 完整场景落地与实机抓图】";
+    const lines = [
+      JSON.stringify({ type: "session", id: "session-title-test", cwd: tmp, createdAt: Date.now() }),
+      JSON.stringify({
+        type: "user/message",
+        seq: 8,
+        time: Date.now(),
+        data: { content: [{ type: "text", text: `${fullFirstLine}\n第二行补充说明` }] },
+      }),
+      JSON.stringify({
+        type: "session/title",
+        seq: 12,
+        time: Date.now(),
+        data: { title: "【ExampleApp · 双模块对比", source: { kind: "fallback" } },
+      }),
+    ].join("\n") + "\n";
+    fs.writeFileSync(fp, zlib.zstdCompressSync(Buffer.from(lines, "utf8")));
+    const parsed = parseSessionFile(fp, { maxItems: 20 });
+    assert.equal(parsed.title, fullFirstLine);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

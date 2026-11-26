@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.2.3" }, {});
+const app = new App({ name: "alilas", version: "3.2.4" }, {});
 
 const EFFORT_LABELS = {
   off: "关",
@@ -89,6 +89,7 @@ const state = {
   errorMsg: "",
   consecutivePollFailures: 0,
   isInline: false,
+  inlineTitleExpanded: false,
   lastInlineHeight: 0,
   toastTimer: null,
 };
@@ -1972,8 +1973,10 @@ function renderInlineCard() {
     }
   }
 
-  // Project & session title
+  // Project & session title (click to expand full title cleanly)
+  const midEl = $("ic-mid");
   const projEl = $("ic-proj");
+  const titleBtn = $("ic-title-btn");
   const titleEl = $("ic-title");
   const proj = shortProjectName(run?.cwd || s?.cwd || state.scopeCwd, s?.workspaceSlug || "");
   if (proj) {
@@ -1988,10 +1991,20 @@ function renderInlineCard() {
     curMeta?.alias ||
     s?.alias ||
     s?.title ||
+    curMeta?.title ||
     run?.taskPreview ||
     (state.selectedSessionId ? state.selectedSessionId : "右侧 ALilaS 面板查看完整会话");
   titleEl.textContent = title;
-  titleEl.title = title;
+  if (midEl) midEl.classList.toggle("expanded", state.inlineTitleExpanded);
+  if (titleBtn) {
+    titleBtn.setAttribute("aria-expanded", String(state.inlineTitleExpanded));
+    titleBtn.title = state.inlineTitleExpanded ? "点击收起标题" : `${title}\n（点击展开完整标题）`;
+  }
+  requestAnimationFrame(() => {
+    if (!titleBtn || !titleEl) return;
+    const isOverflowing = !state.inlineTitleExpanded && titleEl.scrollWidth > titleEl.clientWidth + 1;
+    titleBtn.classList.toggle("can-expand", isOverflowing || state.inlineTitleExpanded);
+  });
 
   // Footer left: inline warning OR live phase OR crisp counters
   const footLeft = $("ic-foot-left");
@@ -2611,6 +2624,10 @@ function bindEvents() {
   }
   $("btn-refresh").addEventListener("click", doManualRefresh);
   $("ic-btn-refresh").addEventListener("click", doManualRefresh);
+  $("ic-title-btn")?.addEventListener("click", () => {
+    state.inlineTitleExpanded = !state.inlineTitleExpanded;
+    renderInlineCard();
+  });
 
   $("btn-toggle-reason").addEventListener("click", () => {
     state.expandAllReasoning = !state.expandAllReasoning;
