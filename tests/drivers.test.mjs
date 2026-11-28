@@ -592,8 +592,270 @@ test("direct engine executes zero-injection SSE tool loop, respects readonly & v
     assert.ok(sid?.startsWith("direct-"));
     const histPath = path.join(tmp, "direct_sessions", `${sid}.json`);
     assert.ok(fs.existsSync(histPath), "direct session history must be persisted");
+
+    // Verify step 2 preserved same-turn reasoning_content for DeepSeek/Kimi compatibility
+    const step2Asst = capturedRequests[1].messages.find((m) => m.role === "assistant");
+    assert.equal(step2Asst?.reasoning_content, "Let me read hello.txt.");
+    // Persisted cross-turn history must strip ephemeral reasoning artifacts
+    const persisted = JSON.parse(fs.readFileSync(histPath, "utf8"));
+    assert.equal(persisted.messages.some((m) => m.reasoning !== undefined), false);
   } finally {
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("direct engine respects reasoningEnabled=false, custom effortMap, Anthropic thinking+signature round-trip & UTF-8 run_command", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alilas-direct-anth-"));
+  const anthRequests = [];
+  let anthTurn = 0;
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url.endsWith("/chat/completions")) {
+        // Non-reasoning check: must NOT include reasoning_effort
+        assert.equal(Object.prototype.hasOwnProperty.call(body, "reasoning_effort"), false);
+        res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "PLAIN_OK" } }] })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
+      }
+
+      if (req.url.endsWith("/messages")) {
+        anthRequests.push(body);
+        anthTurn++;
+        res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+        if (anthTurn === 1) {
+          assert.equal(body.thinking?.type, "enabled");
+          assert.equal(body.thinking?.budget_tokens, 16384);
+          const cmd =
+            process.platform === "win32"
+              ? "Write-Output '中文输出OK'; [Console]::Error.WriteLine('WARN_STDERR')"
+              : "printf '中文输出OK\\n'; printf 'WARN_STDERR\\n' >&2";
+          const evs = [
+            { type: "message_start", message: { usage: { input_tokens: 100, output_tokens: 0 } } },
+            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Step1 thinking" } },
+            { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-abc-123" } },
+            { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tu_cmd_1", name: "run_command" } },
+            {
+              type: "content_block_delta",
+              index: 1,
+              delta: { type: "input_json_delta", partial_json: JSON.stringify({ command: cmd }) },
+            },
+            { type: "message_delta", usage: { output_tokens: 30 } },
+          ];
+          for (const e of evs) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+          res.end();
+        } else {
+          const asstMsg = body.messages.find((m) => m.role === "assistant");
+          const thinkBlk = asstMsg?.content?.find((b) => b.type === "thinking");
+          assert.equal(thinkBlk?.thinking, "Step1 thinking");
+          assert.equal(thinkBlk?.signature, "sig-abc-123");
+          const trMsg = body.messages[body.messages.length - 1];
+          const trText = trMsg?.content?.[0]?.content?.[0]?.text || "";
+          assert.match(trText, /中文输出OK/);
+          assert.match(trText, /WARN_STDERR/);
+          const evs = [
+            { type: "message_start", message: { usage: { input_tokens: 200, output_tokens: 0 } } },
+            { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ANTH_ROUNDTRIP_OK" } },
+            { type: "message_delta", usage: { output_tokens: 12 } },
+          ];
+          for (const e of evs) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+          res.end();
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  const runDirectWorker = (inv) =>
+    new Promise((resolve, reject) => {
+      const events = [];
+      const parser = direct.createParser((e) => events.push(e));
+      const child = spawn(inv.cmd, inv.args, { cwd: inv.cwd, env: inv.env, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdin.write(inv.stdinText, "utf8");
+      child.stdin.end();
+      let buf = "";
+      child.stdout.on("data", (d) => {
+        buf += d.toString("utf8");
+        let idx;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (line) parser.onStdoutLine(line);
+        }
+      });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code, events }));
+    });
+
+  try {
+    // 1) Non-reasoning profile must omit reasoning_effort completely
+    const plainInv = direct.buildInvocation({
+      task: "Say hi",
+      cwd: tmp,
+      model: "plain-model",
+      effort: "high",
+      profile: {
+        id: "p-plain",
+        driver: "direct",
+        api: "openai-completions",
+        baseURL: `http://127.0.0.1:${port}/v1`,
+        model: "plain-model",
+        reasoningEnabled: false,
+        effortMap: {},
+      },
+      dataDir: tmp,
+    });
+    const rPlain = await runDirectWorker(plainInv);
+    assert.equal(rPlain.code, 0);
+    assert.equal(rPlain.events.find((e) => e.type === "final")?.text, "PLAIN_OK");
+
+    // 2) Anthropic custom effortMap ("xhigh" -> "16384") + thinking signature round-trip + UTF-8 run_command
+    const anthInv = direct.buildInvocation({
+      task: "Run command",
+      cwd: tmp,
+      model: "claude-sonnet-4-6",
+      effort: "xhigh",
+      profile: {
+        id: "p-anth",
+        driver: "direct",
+        api: "anthropic-messages",
+        baseURL: `http://127.0.0.1:${port}`,
+        model: "claude-sonnet-4-6",
+        maxTokens: 32000,
+        reasoningEnabled: true,
+        effortMap: { off: "", high: "12288", xhigh: "16384" },
+      },
+      dataDir: tmp,
+    });
+    const rAnth = await runDirectWorker(anthInv);
+    assert.equal(rAnth.code, 0);
+    assert.equal(anthRequests.length, 2);
+    assert.equal(rAnth.events.find((e) => e.type === "final")?.text, "ANTH_ROUNDTRIP_OK");
+  } finally {
+    server.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("discoverDirectModels & probeDirectTools parse upstream metadata and verify 2-turn tool calling", async () => {
+  let probeFailMode = false;
+  const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url.endsWith("/models")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          data: [
+            {
+              id: "gpt-6-astra",
+              context_length: 256000,
+              supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
+            },
+            { id: "gpt-4o-mini", context_window: 128000 },
+          ],
+        }),
+      );
+      return;
+    }
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      const toolMsg = body.messages?.find((m) => m.role === "tool");
+      if (!toolMsg) {
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: null,
+                  reasoning_content: "Calling probe tool",
+                  tool_calls: [{ id: "tc_probe", type: "function", function: { name: "read_sample", arguments: "{}" } }],
+                },
+              },
+            ],
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: probeFailMode ? "ignored-output" : `Echo: ${toolMsg.content}`,
+                },
+              },
+            ],
+          }),
+        );
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const baseURL = `http://127.0.0.1:${port}/v1`;
+
+  try {
+    const disc = await direct.discoverDirectModels({ baseURL, api: "openai-completions" });
+    assert.equal(disc.ok, true);
+    assert.equal(disc.count, 2);
+    const astra = disc.models.find((m) => m.id === "gpt-6-astra");
+    const plain = disc.models.find((m) => m.id === "gpt-4o-mini");
+    assert.equal(astra.contextWindow, 256000);
+    assert.deepEqual(astra.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    assert.equal(plain.reasoningEnabled, false);
+    assert.deepEqual(plain.efforts, []);
+
+    const okRes = await direct.probeDirectTools({ baseURL, model: "gpt-6-astra", api: "openai-completions" });
+    assert.equal(okRes.ok, true);
+
+    probeFailMode = true;
+    const failRes = await direct.probeDirectTools({ baseURL, model: "gpt-6-astra", api: "openai-completions" });
+    assert.equal(failRes.ok, false);
+  } finally {
+    server.close();
+  }
+});
+
+test("dsh driver preserves non-reasoning models without fabricating reasoningEfforts and accepts custom effort keys", () => {
+  const yaml = `
+- id: llm-pi-ai
+  config:
+    providers:
+      up1:
+        api: openai-responses
+        baseURL: https://up1.example.com/v1
+        models:
+          - id: non-think-model
+            name: PlainModel
+            contextWindow: 128000
+            input: [text]
+          - id: flex-think-model
+            name: FlexThink
+            contextWindow: 256000
+            reasoningEfforts:
+              none: none
+              minimal: minimal
+              xhigh: xhigh
+`;
+  const provs = dsh.parseProvidersFromYaml(yaml);
+  const [plain, flex] = provs[0].models;
+  assert.equal(plain.hasReasoning, false);
+  assert.deepEqual(plain.efforts, []);
+  assert.equal(plain.effortMap, null);
+  assert.equal(flex.hasReasoning, true);
+  assert.deepEqual(flex.efforts, ["none", "minimal", "xhigh"]);
+  assert.deepEqual(flex.effortMap, { none: "none", minimal: "minimal", xhigh: "xhigh" });
 });

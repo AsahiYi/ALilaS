@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.3.0" }, {});
+const app = new App({ name: "alilas", version: "3.3.1" }, {});
 
 const API_LABELS = {
   "openai-completions": "OpenAI Chat",
@@ -16,6 +16,8 @@ const API_LABELS = {
 
 const EFFORT_LABELS = {
   off: "关",
+  none: "无",
+  minimal: "极低",
   low: "低",
   medium: "中",
   high: "高",
@@ -25,12 +27,36 @@ const EFFORT_LABELS = {
 
 const EFFORT_ORDER = {
   off: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-  xhigh: 4,
-  max: 5,
+  none: 1,
+  minimal: 2,
+  low: 3,
+  medium: 4,
+  high: 5,
+  xhigh: 6,
+  max: 7,
 };
+
+function createDefaultDirectDraft() {
+  return {
+    name: "",
+    api: "openai-completions",
+    model: "",
+    baseURL: "",
+    apiKeyEnv: "",
+    contextWindow: "",
+    maxTokens: "",
+    supportsImage: false,
+    reasoningEnabled: true,
+    effort: "high",
+    effortRows: [
+      { key: "off", val: "" },
+      { key: "low", val: "low" },
+      { key: "medium", val: "medium" },
+      { key: "high", val: "high" },
+    ],
+    showEffortEditor: false,
+  };
+}
 
 const state = {
   selectedSessionId: null,
@@ -81,6 +107,12 @@ const state = {
   expandedModelRow: "",
   openSettingsFolds: new Set(),
   editingProfileId: "",
+  directDraft: createDefaultDirectDraft(),
+  discoveredDirectModels: [],
+  discoverDirectLoading: false,
+  discoverDirectError: "",
+  probeDirectLoading: false,
+  probeDirectResult: null,
   // Timeline incremental rendering
   openDetails: new Set(),
   closedDetails: new Set(),
@@ -298,9 +330,10 @@ function getSelectionDisplay(sel = state.selection) {
   if (sel.profileId) {
     const p = state.customProfiles.find((x) => x.id === sel.profileId);
     if (p) {
+      const eff = p.reasoningEnabled === false ? "" : effortLabel(sel.effort || p.effort);
       return {
         name: p.name || p.model,
-        effort: effortLabel(sel.effort || p.effort),
+        effort: eff,
         driver: p.driver || "direct",
       };
     }
@@ -360,7 +393,7 @@ function syncInitialSelection() {
     next = {
       driver: p.driver || "direct",
       model: p.model,
-      effort: def.effort || p.effort || "high",
+      effort: p.reasoningEnabled === false ? "" : def.effort || p.effort || "",
       profileId: p.id,
     };
   } else if (def.driver) {
@@ -422,13 +455,13 @@ function syncInitialSelection() {
 function isDefaultMatch(driver, model, effort, profileId = "") {
   const def = state.defaultSelection || {};
   if (profileId) {
-    return def.profileId === profileId && (def.effort || "high") === (effort || "high");
+    return def.profileId === profileId && (def.effort || "") === (effort || "");
   }
   if (def.profileId) return false;
   if (def.driver !== driver) return false;
   if (def.model !== model) return false;
   if (driver === "agy") return true;
-  return (def.effort || "high") === (effort || "high");
+  return (def.effort || "") === (effort || "");
 }
 
 // ---------------------------------------------------------------- Header & Telemetry Bar
@@ -840,26 +873,46 @@ function buildSettingsModelListHtml() {
                 !state.selection.profileId &&
                 state.selection.driver === "dsh" &&
                 (state.selection.model === compId || state.selection.model === m.id);
-              const curEffort = isSel ? state.selection.effort || "high" : "high";
+              const hasReasoning =
+                m.hasReasoning !== false &&
+                ((m.effortMap && Object.keys(m.effortMap).length > 0) || (m.efforts && m.efforts.length > 0));
+              const efforts = hasReasoning
+                ? m.effortMap && Object.keys(m.effortMap).length > 0
+                  ? Object.keys(m.effortMap)
+                  : m.efforts.includes("off")
+                    ? m.efforts
+                    : ["off", ...m.efforts]
+                : [];
+              const fallbackEff = efforts.includes("high")
+                ? "high"
+                : efforts.find((x) => x !== "off" && x !== "none") || efforts[0] || "";
+              const curEffort = !hasReasoning
+                ? ""
+                : isSel && efforts.includes(state.selection.effort)
+                  ? state.selection.effort
+                  : fallbackEff;
               const isExpanded = state.expandedModelRow === rowKey;
-              const efforts = ["off", ...(m.efforts?.length ? m.efforts : ["low", "medium", "high"])];
               const isDef = isDefaultMatch("dsh", compId, curEffort);
 
               const trayHtml = isExpanded
                 ? `<div class="effort-tray">
                     <div class="effort-chips">
-                      ${efforts
-                        .map(
-                          (ef) =>
-                            `<button type="button" class="effort-chip ${
-                              isSel && curEffort === ef ? "active" : ""
-                            }" data-pick-driver="dsh" data-pick-model="${escapeHtml(
-                              compId,
-                            )}" data-pick-effort="${escapeHtml(ef)}" data-apply-toast="1">${escapeHtml(
-                              effortLabel(ef),
-                            )}</button>`,
-                        )
-                        .join("")}
+                      ${
+                        efforts.length
+                          ? efforts
+                              .map(
+                                (ef) =>
+                                  `<button type="button" class="effort-chip ${
+                                    isSel && curEffort === ef ? "active" : ""
+                                  }" data-pick-driver="dsh" data-pick-model="${escapeHtml(
+                                    compId,
+                                  )}" data-pick-effort="${escapeHtml(ef)}" data-apply-toast="1">${escapeHtml(
+                                    effortLabel(ef),
+                                  )}</button>`,
+                              )
+                              .join("")
+                          : `<span class="muted" style="font-size:11px;">该模型未启用推理等级</span>`
+                      }
                     </div>
                     <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-driver="dsh" data-pin-model="${escapeHtml(
                       compId,
@@ -996,12 +1049,28 @@ function buildSettingsModelListHtml() {
   if (!list.length) {
     return `<div class="pop-empty">暂无直连 API 模型。可在下方「直连 API 模型」折叠栏填写 Base URL、协议与 Key 环境变量名添加（无需安装外部 CLI，无第三方系统注入）。</div>`;
   }
-  const directEfforts = ["off", "low", "medium", "high"];
   return list
     .map((p) => {
       const rowKey = `direct::${p.id}`;
       const isSel = state.selection.profileId === p.id;
-      const curEffort = isSel ? state.selection.effort || p.effort || "high" : p.effort || "high";
+      const reasoningOn = p.reasoningEnabled !== false;
+      const directEfforts = reasoningOn
+        ? Object.keys(
+            p.effortMap && Object.keys(p.effortMap).length
+              ? p.effortMap
+              : { off: "", low: "low", medium: "medium", high: "high" },
+          )
+        : [];
+      const fallbackEff = directEfforts.includes(p.effort)
+        ? p.effort
+        : directEfforts.includes("high")
+          ? "high"
+          : directEfforts.find((x) => x !== "off" && x !== "none") || directEfforts[0] || "";
+      const curEffort = !reasoningOn
+        ? ""
+        : isSel && directEfforts.includes(state.selection.effort)
+          ? state.selection.effort
+          : fallbackEff;
       const isExpanded = state.expandedModelRow === rowKey;
       const isDef = isDefaultMatch(p.driver || "direct", p.model, curEffort, p.id);
       const hasVision = Array.isArray(p.inputs) && p.inputs.includes("image");
@@ -1013,16 +1082,20 @@ function buildSettingsModelListHtml() {
       const trayHtml = isExpanded
         ? `<div class="effort-tray">
             <div class="effort-chips">
-              ${directEfforts
-                .map(
-                  (ef) =>
-                    `<button type="button" class="effort-chip ${
-                      isSel && curEffort === ef ? "active" : ""
-                    }" data-pick-profile="${escapeHtml(p.id)}" data-pick-effort="${escapeHtml(
-                      ef,
-                    )}" data-apply-toast="1">${escapeHtml(effortLabel(ef))}</button>`,
-                )
-                .join("")}
+              ${
+                directEfforts.length
+                  ? directEfforts
+                      .map(
+                        (ef) =>
+                          `<button type="button" class="effort-chip ${
+                            isSel && curEffort === ef ? "active" : ""
+                          }" data-pick-profile="${escapeHtml(p.id)}" data-pick-effort="${escapeHtml(
+                            ef,
+                          )}" data-apply-toast="1">${escapeHtml(effortLabel(ef))}</button>`,
+                      )
+                      .join("")
+                  : `<span class="muted" style="font-size:11px;">已关闭推理等级（不发思考参数）</span>`
+              }
             </div>
             <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-profile="${escapeHtml(
               p.id,
@@ -1325,6 +1398,67 @@ function renderLifetimeUsageView() {
     </div>`;
 }
 
+function syncDirectDraftFromDom() {
+  const d = state.directDraft;
+  if ($("pf-name")) d.name = $("pf-name").value;
+  if ($("pf-api")) d.api = $("pf-api").value;
+  if ($("pf-model")) d.model = $("pf-model").value;
+  if ($("pf-baseurl")) d.baseURL = $("pf-baseurl").value;
+  if ($("pf-keyenv")) d.apiKeyEnv = $("pf-keyenv").value;
+  if ($("pf-cw")) d.contextWindow = $("pf-cw").value;
+  if ($("pf-maxtok")) d.maxTokens = $("pf-maxtok").value;
+  if ($("pf-effort")) d.effort = $("pf-effort").value;
+  if ($("pf-inp-image")) d.supportsImage = Boolean($("pf-inp-image").checked);
+  if ($("pf-reasoning-on")) d.reasoningEnabled = Boolean($("pf-reasoning-on").checked);
+  const rows = document.querySelectorAll("#pf-effort-rows .eff-row");
+  if (rows.length > 0) {
+    d.effortRows = Array.from(rows).map((r) => ({
+      key: r.querySelector("[data-eff-key]")?.value || "",
+      val: r.querySelector("[data-eff-val]")?.value || "",
+    }));
+  }
+}
+
+function loadProfileIntoDraft(p) {
+  if (!p) {
+    state.directDraft = createDefaultDirectDraft();
+    state.probeDirectResult = null;
+    return;
+  }
+  const reasoningEnabled = p.reasoningEnabled !== false;
+  const mapObj =
+    p.effortMap && typeof p.effortMap === "object" && Object.keys(p.effortMap).length
+      ? p.effortMap
+      : reasoningEnabled
+        ? { off: "", low: "low", medium: "medium", high: "high" }
+        : {};
+  state.directDraft = {
+    name: p.name || "",
+    api: p.api || "openai-completions",
+    model: p.model || "",
+    baseURL: p.baseURL || "",
+    apiKeyEnv: p.apiKeyEnv || "",
+    contextWindow: p.contextWindow ? String(p.contextWindow) : "",
+    maxTokens: p.maxTokens ? String(p.maxTokens) : "",
+    supportsImage: Array.isArray(p.inputs) && p.inputs.includes("image"),
+    reasoningEnabled,
+    effort: p.effort || "",
+    effortRows: Object.entries(mapObj).map(([key, val]) => ({ key, val: val ?? "" })),
+    showEffortEditor: false,
+  };
+  state.probeDirectResult = null;
+}
+
+function draftToEffortMap(draft = state.directDraft) {
+  const map = {};
+  for (const r of draft.effortRows || []) {
+    const k = String(r.key || "").trim();
+    if (!k) continue;
+    map[k] = String(r.val ?? "").trim();
+  }
+  return map;
+}
+
 function renderSettingsView() {
   const curDisp = getSelectionDisplay(state.selection);
   const defDisp = getSelectionDisplay(state.defaultSelection);
@@ -1365,21 +1499,87 @@ function renderSettingsView() {
   const editing = state.editingProfileId
     ? state.customProfiles.find((x) => x.id === state.editingProfileId) || null
     : null;
-  const editApi = editing?.api || "openai-completions";
-  const editEffort = editing?.effort || "high";
-  const editImageChecked = editing ? Array.isArray(editing.inputs) && editing.inputs.includes("image") : false;
+  const d = state.directDraft;
+  const validEffortKeys = (d.effortRows || []).map((r) => String(r.key || "").trim()).filter(Boolean);
+  const effectiveDraftEffort = d.reasoningEnabled
+    ? validEffortKeys.includes(d.effort)
+      ? d.effort
+      : validEffortKeys.includes("high")
+        ? "high"
+        : validEffortKeys.find((x) => x !== "off" && x !== "none") || validEffortKeys[0] || ""
+    : "";
+
+  const effortOptionsHtml = d.reasoningEnabled
+    ? validEffortKeys.length
+      ? validEffortKeys
+          .map(
+            (k) =>
+              `<option value="${escapeHtml(k)}" ${
+                effectiveDraftEffort === k ? "selected" : ""
+              }>默认思考: ${escapeHtml(effortLabel(k))}${
+                EFFORT_LABELS[k.toLowerCase()] ? ` (${escapeHtml(k)})` : ""
+              }</option>`,
+          )
+          .join("")
+      : `<option value="">未配置档位</option>`
+    : `<option value="">推理等级已关闭</option>`;
+
+  const effortEditorHtml =
+    d.reasoningEnabled && d.showEffortEditor
+      ? `<div id="pf-effort-rows" class="eff-editor">
+          <div class="eff-head"><span>档位名</span><span>API 参数值（留空=关闭思考）</span><span></span></div>
+          ${(d.effortRows || [])
+            .map(
+              (r, idx) => `<div class="eff-row">
+                <input data-eff-key="${idx}" placeholder="如 high / xhigh / max" value="${escapeHtml(r.key)}" />
+                <input data-eff-val="${idx}" placeholder="如 high / 16384" value="${escapeHtml(r.val)}" />
+                <button type="button" class="eff-del" data-del-effort-row="${idx}" title="删除此档位">✕</button>
+              </div>`,
+            )
+            .join("")}
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px;">
+            <span class="muted" style="font-size:10px;">Anthropic 协议可填数字作为 budget_tokens</span>
+            <button type="button" class="btn" id="btn-add-effort-row">+ 添加档位</button>
+          </div>
+        </div>`
+      : "";
+
+  const discHtml = state.discoverDirectError
+    ? `<div class="probe-banner err form-full">${escapeHtml(state.discoverDirectError)}</div>`
+    : state.discoveredDirectModels.length
+      ? `<div class="disc-box">
+          ${state.discoveredDirectModels
+            .slice(0, 60)
+            .map(
+              (m, idx) => `<button type="button" class="disc-pill" data-apply-discovered="${idx}" title="点击自动回填：${escapeHtml(
+                m.id,
+              )} · ${formatTokens(m.contextWindow)}${
+                m.reasoningEnabled ? ` · ${m.efforts.join("/")}` : " · 非思考模型"
+              }">${escapeHtml(m.id)} <span class="muted">${formatTokens(m.contextWindow)}</span></button>`,
+            )
+            .join("")}
+        </div>`
+      : "";
+
+  const probeBannerHtml = state.probeDirectResult
+    ? `<div class="probe-banner ${state.probeDirectResult.ok ? "ok" : "err"}">${
+        state.probeDirectResult.ok ? "✓ " : "✕ "
+      }${escapeHtml(state.probeDirectResult.message || "")}</div>`
+    : "";
 
   const customListHtml = state.customProfiles.length
     ? state.customProfiles
         .map((p) => {
           const apiShort = API_LABELS[p.api || "openai-completions"] || p.api || "OpenAI Chat";
           const cap = Array.isArray(p.inputs) && p.inputs.includes("image") ? "视觉" : "纯文本";
+          const rBadge = p.reasoningEnabled === false ? `<span class="pop-badge">非思考</span>` : "";
           const isEditingThis = editing?.id === p.id;
           return `<div class="call-row">
             <div class="call-left">
               <div class="call-top">
                 <span>${escapeHtml(p.name || p.model)}</span>
                 <span class="pop-badge ${cap === "视觉" ? "vision" : ""}">${cap}</span>
+                ${rBadge}
                 ${isEditingThis ? `<span class="pop-badge plugin">编辑中</span>` : ""}
               </div>
               <div class="call-sub">${escapeHtml(apiShort)} · ${escapeHtml(p.model)} · ${formatTokens(
@@ -1458,53 +1658,64 @@ function renderSettingsView() {
       </summary>
       <div class="fold-body">
         <div class="form-grid">
-          <input id="pf-name" placeholder="显示名称（如 DeepSeek 直连）" value="${escapeHtml(
-            editing?.name || "",
+          <input id="pf-baseurl" class="form-full" placeholder="Base URL（必填，如 https://api.example.com/v1）" value="${escapeHtml(
+            d.baseURL,
           )}" />
+          <div class="inline-input-row">
+            <input id="pf-keyenv" placeholder="API Key 环境变量名（如 MY_API_KEY，绝不存明文）" value="${escapeHtml(
+              d.apiKeyEnv,
+            )}" />
+            <button id="btn-discover-direct" type="button" class="btn" ${
+              state.discoverDirectLoading ? "disabled" : ""
+            }>${state.discoverDirectLoading ? "获取中…" : "获取模型"}</button>
+          </div>
+          ${discHtml}
+          <input id="pf-name" placeholder="显示名称（如 DeepSeek 直连）" value="${escapeHtml(d.name)}" />
           <select id="pf-api">
             <option value="openai-completions" ${
-              editApi === "openai-completions" ? "selected" : ""
+              d.api === "openai-completions" ? "selected" : ""
             }>协议: OpenAI Chat Completions</option>
             <option value="openai-responses" ${
-              editApi === "openai-responses" ? "selected" : ""
+              d.api === "openai-responses" ? "selected" : ""
             }>协议: OpenAI Responses</option>
             <option value="anthropic-messages" ${
-              editApi === "anthropic-messages" ? "selected" : ""
+              d.api === "anthropic-messages" ? "selected" : ""
             }>协议: Anthropic Messages</option>
           </select>
-          <input id="pf-model" placeholder="模型 ID（必填，如 deepseek-chat）" value="${escapeHtml(
-            editing?.model || "",
-          )}" />
-          <select id="pf-effort">
-            <option value="high" ${editEffort === "high" ? "selected" : ""}>默认思考: 高</option>
-            <option value="medium" ${editEffort === "medium" ? "selected" : ""}>默认思考: 中</option>
-            <option value="low" ${editEffort === "low" ? "selected" : ""}>默认思考: 低</option>
-            <option value="off" ${editEffort === "off" ? "selected" : ""}>默认思考: 关</option>
+          <input id="pf-model" placeholder="模型 ID（必填，如 deepseek-chat）" value="${escapeHtml(d.model)}" />
+          <select id="pf-effort" ${d.reasoningEnabled ? "" : "disabled"}>
+            ${effortOptionsHtml}
           </select>
-          <input id="pf-baseurl" class="form-full" placeholder="Base URL（必填，如 https://api.example.com/v1）" value="${escapeHtml(
-            editing?.baseURL || "",
+          <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" value="${escapeHtml(
+            d.contextWindow,
           )}" />
-          <input id="pf-keyenv" class="form-full" placeholder="API Key 环境变量名（如 MY_API_KEY，绝不存明文）" value="${escapeHtml(
-            editing?.apiKeyEnv || "",
+          <input id="pf-maxtok" type="number" placeholder="最大输出（默认 64000）" value="${escapeHtml(
+            d.maxTokens,
           )}" />
-          <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" value="${
-            editing?.contextWindow || ""
-          }" />
-          <input id="pf-maxtok" type="number" placeholder="最大输出（默认 64000）" value="${
-            editing?.maxTokens || ""
-          }" />
           <div class="form-checks form-full">
             <span>输入类型</span>
             <div class="form-checks-group">
               <label class="chk-label"><input id="pf-inp-text" type="checkbox" checked disabled />文本</label>
               <label class="chk-label"><input id="pf-inp-image" type="checkbox" ${
-                editImageChecked ? "checked" : ""
+                d.supportsImage ? "checked" : ""
               } />图片 / 识图</label>
             </div>
           </div>
+          <div class="form-checks form-full">
+            <label class="chk-label">
+              <input id="pf-reasoning-on" type="checkbox" ${d.reasoningEnabled ? "checked" : ""} />
+              <span>启用推理等级</span>
+            </label>
+            <button id="btn-toggle-effort-map" type="button" class="btn" ${
+              d.reasoningEnabled ? "" : "disabled"
+            }>档位映射 (${validEffortKeys.length}) ${d.showEffortEditor ? "▴" : "▾"}</button>
+          </div>
+          ${effortEditorHtml}
         </div>
         <div class="form-actions">
-          <span class="muted" style="font-size:10.5px;">独立直连引擎，零第三方提示注入</span>
+          <button id="btn-probe-direct" type="button" class="btn" ${
+            state.probeDirectLoading ? "disabled" : ""
+          }>${state.probeDirectLoading ? "测试中…" : "测试工具"}</button>
           <div class="row-actions">
             ${
               editing
@@ -1516,6 +1727,7 @@ function renderSettingsView() {
             }</button>
           </div>
         </div>
+        ${probeBannerHtml}
         ${customListHtml}
       </div>
     </details>`;
@@ -1594,7 +1806,7 @@ function renderOverlayView(force = false) {
     titleEl.innerHTML = `
       <span class="ov-icon">${OV_ICONS.settings}</span>
       <span>模型与设置</span>
-      <span class="ov-sub">v3.3.0</span>`;
+      <span class="ov-sub">v3.3.1</span>`;
     bodyEl.innerHTML = renderSettingsView();
     const newList = $("settings-model-list");
     if (newList) newList.scrollTop = prevListScroll;
@@ -2473,6 +2685,10 @@ function bindEvents() {
       state.modelSearch = e.target.value || "";
       const listEl = $("settings-model-list");
       if (listEl) listEl.innerHTML = buildSettingsModelListHtml();
+      return;
+    }
+    if (e.target?.id?.startsWith("pf-") || e.target?.hasAttribute("data-eff-key") || e.target?.hasAttribute("data-eff-val")) {
+      syncDirectDraftFromDom();
     }
   });
 
@@ -2488,13 +2704,13 @@ function bindEvents() {
     if (pinProfBtn) {
       e.stopPropagation();
       const pid = pinProfBtn.getAttribute("data-pin-profile");
-      const eff = pinProfBtn.getAttribute("data-pin-effort") || "";
+      const eff = pinProfBtn.getAttribute("data-pin-effort") ?? "";
       const p = state.customProfiles.find((x) => x.id === pid);
       if (p) {
         await pinDefaultModel({
           driver: p.driver || "direct",
           model: p.model,
-          effort: eff || p.effort || "high",
+          effort: p.reasoningEnabled === false ? "" : eff || p.effort || "",
           profileId: p.id,
         });
       }
@@ -2507,7 +2723,7 @@ function bindEvents() {
       await pinDefaultModel({
         driver: pinBtn.getAttribute("data-pin-driver") || "",
         model: pinBtn.getAttribute("data-pin-model") || "",
-        effort: pinBtn.getAttribute("data-pin-effort") || "high",
+        effort: pinBtn.getAttribute("data-pin-effort") ?? "",
         profileId: "",
       });
       return;
@@ -2526,12 +2742,12 @@ function bindEvents() {
     const pickProfBtn = e.target.closest("[data-pick-profile]");
     if (pickProfBtn) {
       const pid = pickProfBtn.getAttribute("data-pick-profile");
-      const eff = pickProfBtn.getAttribute("data-pick-effort") || "";
+      const eff = pickProfBtn.getAttribute("data-pick-effort") ?? "";
       const rowKey = pickProfBtn.getAttribute("data-toggle-row");
       const applyToast = pickProfBtn.getAttribute("data-apply-toast") === "1";
       const p = state.customProfiles.find((x) => x.id === pid);
       if (p) {
-        const nextEffort = eff || p.effort || "high";
+        const nextEffort = p.reasoningEnabled === false ? "" : eff || p.effort || "";
         state.selection = {
           driver: p.driver || "direct",
           model: p.model,
@@ -2544,7 +2760,9 @@ function bindEvents() {
         }
         renderModelCapsule();
         if (applyToast || !rowKey) {
-          showToast(`已切换: ${p.name || p.model} · ${effortLabel(nextEffort)}`);
+          showToast(
+            `已切换: ${p.name || p.model}${nextEffort ? ` · ${effortLabel(nextEffort)}` : ""}`,
+          );
         }
         refreshSettingsModelSection();
       }
@@ -2555,7 +2773,7 @@ function bindEvents() {
     if (pickBtn) {
       const drv = pickBtn.getAttribute("data-pick-driver") || "";
       const mdl = pickBtn.getAttribute("data-pick-model") || "";
-      const eff = pickBtn.getAttribute("data-pick-effort") || "high";
+      const eff = pickBtn.getAttribute("data-pick-effort") ?? "";
       const rowKey = pickBtn.getAttribute("data-toggle-row");
       const applyToast = pickBtn.getAttribute("data-apply-toast") === "1";
 
@@ -2599,9 +2817,135 @@ function bindEvents() {
       return;
     }
 
+    if (e.target.closest("#btn-discover-direct")) {
+      syncDirectDraftFromDom();
+      const baseURL = state.directDraft.baseURL.trim();
+      if (!baseURL) {
+        showToast("请先填写 Base URL");
+        return;
+      }
+      state.discoverDirectLoading = true;
+      state.discoverDirectError = "";
+      state.discoveredDirectModels = [];
+      state.openSettingsFolds.add("custom");
+      renderOverlayView(true);
+      try {
+        const res = await app.callServerTool({
+          name: "alilas_ui_manage_profiles",
+          arguments: {
+            action: "discover_models",
+            base_url: baseURL,
+            api_key_env: state.directDraft.apiKeyEnv.trim(),
+            api: state.directDraft.api || "openai-completions",
+          },
+        });
+        const disc = res?.structuredContent?.discovered;
+        if (disc?.ok && Array.isArray(disc.models)) {
+          state.discoveredDirectModels = disc.models;
+          showToast(`已获取 ${disc.models.length} 个可用模型，点击一键回填`);
+        } else {
+          state.discoverDirectError = disc?.error || "获取模型失败";
+        }
+      } catch (err) {
+        state.discoverDirectError = err?.message || String(err);
+      } finally {
+        state.discoverDirectLoading = false;
+        renderOverlayView(true);
+      }
+      return;
+    }
+
+    const applyDiscBtn = e.target.closest("[data-apply-discovered]");
+    if (applyDiscBtn) {
+      syncDirectDraftFromDom();
+      const idx = Number(applyDiscBtn.getAttribute("data-apply-discovered"));
+      const m = state.discoveredDirectModels[idx];
+      if (m) {
+        const d = state.directDraft;
+        d.model = m.id;
+        if (!d.name.trim()) d.name = m.name || m.id;
+        d.contextWindow = String(m.contextWindow || 200000);
+        if (m.maxTokens) d.maxTokens = String(m.maxTokens);
+        d.reasoningEnabled = m.reasoningEnabled !== false;
+        d.effortRows = Object.entries(m.effortMap || {}).map(([key, val]) => ({ key, val: val ?? "" }));
+        d.effort = m.defaultEffort || "";
+        state.probeDirectResult = null;
+        showToast(`已回填 ${m.id}`);
+        renderOverlayView(true);
+      }
+      return;
+    }
+
+    if (e.target.closest("#btn-toggle-effort-map")) {
+      syncDirectDraftFromDom();
+      state.directDraft.showEffortEditor = !state.directDraft.showEffortEditor;
+      renderOverlayView(true);
+      return;
+    }
+
+    if (e.target.closest("#btn-add-effort-row")) {
+      syncDirectDraftFromDom();
+      state.directDraft.effortRows.push({ key: "", val: "" });
+      state.directDraft.showEffortEditor = true;
+      renderOverlayView(true);
+      return;
+    }
+
+    const delEffBtn = e.target.closest("[data-del-effort-row]");
+    if (delEffBtn) {
+      syncDirectDraftFromDom();
+      const idx = Number(delEffBtn.getAttribute("data-del-effort-row"));
+      if (Number.isInteger(idx) && idx >= 0) {
+        state.directDraft.effortRows.splice(idx, 1);
+        renderOverlayView(true);
+      }
+      return;
+    }
+
+    if (e.target.closest("#btn-probe-direct")) {
+      syncDirectDraftFromDom();
+      const d = state.directDraft;
+      if (!d.baseURL.trim() || !d.model.trim()) {
+        showToast("请先填写 Base URL 和模型 ID");
+        return;
+      }
+      state.probeDirectLoading = true;
+      state.probeDirectResult = null;
+      renderOverlayView(true);
+      try {
+        const res = await app.callServerTool({
+          name: "alilas_ui_manage_profiles",
+          arguments: {
+            action: "probe_tools",
+            base_url: d.baseURL.trim(),
+            api_key_env: d.apiKeyEnv.trim(),
+            api: d.api || "openai-completions",
+            model: d.model.trim(),
+            max_tokens: Number(d.maxTokens) || 1024,
+            reasoning_enabled: Boolean(d.reasoningEnabled),
+            effort: d.reasoningEnabled ? d.effort || "" : "",
+            effort_map: d.reasoningEnabled ? draftToEffortMap(d) : {},
+          },
+        });
+        state.probeDirectResult = res?.structuredContent?.probe || {
+          ok: false,
+          message: "未收到探针响应",
+        };
+      } catch (err) {
+        state.probeDirectResult = { ok: false, message: err?.message || String(err) };
+      } finally {
+        state.probeDirectLoading = false;
+        renderOverlayView(true);
+      }
+      return;
+    }
+
     const editBtn = e.target.closest("[data-edit-profile]");
     if (editBtn) {
-      state.editingProfileId = editBtn.getAttribute("data-edit-profile") || "";
+      const pid = editBtn.getAttribute("data-edit-profile") || "";
+      const p = state.customProfiles.find((x) => x.id === pid) || null;
+      state.editingProfileId = p ? p.id : "";
+      loadProfileIntoDraft(p);
       state.openSettingsFolds.add("custom");
       renderOverlayView(true);
       return;
@@ -2609,20 +2953,25 @@ function bindEvents() {
 
     if (e.target.closest("#btn-cancel-edit-profile")) {
       state.editingProfileId = "";
+      loadProfileIntoDraft(null);
       renderOverlayView(true);
       return;
     }
 
     if (e.target.closest("#btn-save-profile")) {
-      const name = $("pf-name")?.value.trim() || "";
-      const api = $("pf-api")?.value || "openai-completions";
-      const model = $("pf-model")?.value.trim() || "";
-      const effort = $("pf-effort")?.value || "high";
-      const baseURL = $("pf-baseurl")?.value.trim() || "";
-      const apiKeyEnv = $("pf-keyenv")?.value.trim() || "";
-      const cw = Number($("pf-cw")?.value) || 200000;
-      const maxTokens = Number($("pf-maxtok")?.value) || 64000;
-      const inputs = $("pf-inp-image")?.checked ? ["text", "image"] : ["text"];
+      syncDirectDraftFromDom();
+      const d = state.directDraft;
+      const name = d.name.trim();
+      const api = d.api || "openai-completions";
+      const model = d.model.trim();
+      const baseURL = d.baseURL.trim();
+      const apiKeyEnv = d.apiKeyEnv.trim();
+      const cw = Number(d.contextWindow) || 200000;
+      const maxTokens = Number(d.maxTokens) || 64000;
+      const inputs = d.supportsImage ? ["text", "image"] : ["text"];
+      const reasoningEnabled = Boolean(d.reasoningEnabled);
+      const effortMap = reasoningEnabled ? draftToEffortMap(d) : {};
+      const effort = reasoningEnabled ? d.effort || "" : "";
       if (!model) {
         showToast("请填写模型 ID");
         return;
@@ -2648,6 +2997,8 @@ function bindEvents() {
             contextWindow: cw,
             maxTokens,
             inputs,
+            reasoningEnabled,
+            effortMap,
             effort,
           },
         },
@@ -2659,6 +3010,9 @@ function bindEvents() {
         state.drivers = res.structuredContent.drivers;
       }
       state.editingProfileId = "";
+      loadProfileIntoDraft(null);
+      state.discoveredDirectModels = [];
+      state.discoverDirectError = "";
       state.settingsEngineTab = "direct";
       state.lastEtag = "";
       showToast(wasEditing ? "已更新直连模型" : "已保存直连模型");
@@ -2680,7 +3034,10 @@ function bindEvents() {
       if (res?.structuredContent?.drivers) {
         state.drivers = res.structuredContent.drivers;
       }
-      if (state.editingProfileId === pid) state.editingProfileId = "";
+      if (state.editingProfileId === pid) {
+        state.editingProfileId = "";
+        loadProfileIntoDraft(null);
+      }
       if (state.selection.profileId === pid) {
         state.selection = { driver: "", model: "", effort: "high", profileId: "" };
         state.userTouchedModel = false;
@@ -2693,6 +3050,24 @@ function bindEvents() {
   });
 
   $("ov-body").addEventListener("change", async (e) => {
+    if (e.target?.id === "pf-reasoning-on") {
+      syncDirectDraftFromDom();
+      state.directDraft.reasoningEnabled = Boolean(e.target.checked);
+      if (state.directDraft.reasoningEnabled && state.directDraft.effortRows.length === 0) {
+        state.directDraft.effortRows = [
+          { key: "off", val: "" },
+          { key: "low", val: "low" },
+          { key: "medium", val: "medium" },
+          { key: "high", val: "high" },
+        ];
+      }
+      renderOverlayView(true);
+      return;
+    }
+    if (e.target?.id?.startsWith("pf-")) {
+      syncDirectDraftFromDom();
+      return;
+    }
     if (e.target?.id === "set-scan-dsh") {
       const checked = Boolean(e.target.checked);
       const res = await app.callServerTool({

@@ -697,6 +697,46 @@ const html = `<!doctype html>
     display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
   }
   .row-actions { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+  .inline-input-row { display: flex; align-items: center; gap: 6px; grid-column: 1 / -1; }
+  .inline-input-row input { flex: 1; min-width: 0; }
+  .disc-box {
+    grid-column: 1 / -1;
+    display: flex; flex-wrap: wrap; gap: 5px;
+    max-height: 112px; overflow-y: auto;
+    padding: 6px; border-radius: 7px;
+    background: var(--bg-1); border: 1px solid var(--bd-2);
+  }
+  .disc-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 7px; border-radius: 6px;
+    background: var(--bg-2); border: 1px solid var(--bd-1);
+    color: var(--fg-2); font-size: 10.5px; font-family: var(--mono); cursor: pointer;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .disc-pill:hover { border-color: var(--brand); color: var(--fg-1); background: var(--brand-soft); }
+  .eff-editor {
+    grid-column: 1 / -1;
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 7px 8px; border-radius: 7px;
+    background: var(--bg-1); border: 1px solid var(--bd-2);
+  }
+  .eff-head {
+    display: grid; grid-template-columns: 1fr 1.15fr 24px; gap: 5px;
+    font-size: 10px; color: var(--fg-3); padding: 0 2px;
+  }
+  .eff-row { display: grid; grid-template-columns: 1fr 1.15fr 24px; gap: 5px; align-items: center; }
+  .eff-row input { padding: 4px 6px; font-size: 11px; font-family: var(--mono); }
+  .eff-del {
+    width: 24px; height: 24px; padding: 0; border-radius: 5px;
+    background: transparent; border: 1px solid var(--bd-1); color: var(--fg-3); cursor: pointer;
+  }
+  .eff-del:hover { color: var(--danger); border-color: var(--danger); }
+  .probe-banner {
+    padding: 6px 9px; border-radius: 7px; font-size: 11.5px; line-height: 1.45;
+    border: 1px solid var(--bd-1); background: var(--bg-1); color: var(--fg-2);
+  }
+  .probe-banner.ok { border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.08); color: var(--success); }
+  .probe-banner.err { border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); color: var(--danger); }
   .setting-row {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     font-size: 12px; color: var(--fg-2);

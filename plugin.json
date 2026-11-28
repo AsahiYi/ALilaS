@@ -1,7 +1,7 @@
 {
   "name": "alilas",
   "displayName": "ALilaS",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "Better-subagent studio for Antigravity: multi-engine headless subagents (Antigravity agy, DeepSeek Harness, Claude Code, Codex CLI, plus zero-injection Direct API) with per-run model switching, typewriter reasoning streams, merged tool cards, live ring/TPS/token telemetry, and stall recovery.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [

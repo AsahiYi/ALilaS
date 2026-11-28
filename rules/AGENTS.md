@@ -12,7 +12,7 @@ Before calling `alilas_start_task`:
 1. **Ground First, Never Guess**: Run 1–2 fast read-only checks to confirm **exact file paths, real environment/service names, and shell dialect** (e.g., Windows PowerShell 5.1 vs POSIX shell). Never pass unverified assumptions or bundle open-ended exploration + design + implementation into one mega-prompt.
 2. **Keep Briefs Tight & Scoped**: Aim for concise, concrete instructions (~200–800 chars, one clear deliverable): verified paths → exact change/goal → explicit verification command → stop-on-block rule (*"If blocked or hitting the same error 3 times, stop and report the exact error instead of looping"*).
 3. **Avoid Workspace Rule Conflicts**: When the target workspace has coordinator-oriented `AGENTS.md` rules (e.g., "ask user before editing"), explicitly open the brief with an execution directive: *"You are an authorized headless execution subagent for this scoped task; perform the specified edits and verification directly without pausing for interactive confirmation."*
-4. **Match Effort Without Silently Downgrading**: Respect the user's configured default `driver` / `model` / `effort` for complex tasks; only override `effort: "medium"` per run on clearly mechanical, fully-specified edits to avoid overthinking latency.
+4. **Never Silently Downgrade Effort**: Leave `driver` / `model` / `effort` unset so ALilaS strictly honors the user's configured default model and thinking effort; only override `effort` when the user explicitly requests it.
 
 ## 3. Standard Workflow (`alilas_alilas` MCP Server)
 

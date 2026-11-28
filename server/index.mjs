@@ -22,6 +22,7 @@ import {
   parseSessionFile as parseDshSessionFile,
 } from "./dsh_reader.mjs";
 import { detectAllDrivers, getDriver } from "./drivers/index.mjs";
+import { discoverDirectModels, probeDirectTools } from "./drivers/direct.mjs";
 import { inferContextWindow } from "./drivers/utils.mjs";
 import { createProfileStore } from "./profiles.mjs";
 import { createTimelineStore } from "./timeline_store.mjs";
@@ -326,11 +327,13 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
   }
 
   const effectiveEffort =
-    effort ||
-    profile?.effort ||
-    (sessMeta?.driver === effectiveDriver ? sessMeta.effort : "") ||
-    def.effort ||
-    "high";
+    profile?.reasoningEnabled === false
+      ? ""
+      : effort ||
+        profile?.effort ||
+        (sessMeta?.driver === effectiveDriver ? sessMeta.effort : "") ||
+        def.effort ||
+        "high";
 
   const foundModel = dInfo?.models?.find(
     (m) => m.compositeId === effectiveModel || m.id === effectiveModel,
@@ -1668,7 +1671,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.3.0",
+  version: "3.3.1",
 });
 
 registerAppResource(
@@ -1766,9 +1769,10 @@ registerAppTool(
         .describe("可选：指定底层驱动（默认按用户配置的默认子代理模型自动选择）"),
       model: z.string().optional().describe("可选：本次运行指定的模型 ID（与并发其他会话零冲突）"),
       effort: z
-        .enum(["off", "low", "medium", "high", "xhigh", "max"])
+        .string()
+        .max(40)
         .optional()
-        .describe("可选：推理强度"),
+        .describe("可选：推理强度（如 off / none / minimal / low / medium / high / xhigh / max 或上游自定义档位；默认沿用用户选定配置）"),
       profile_id: z.string().optional().describe("可选：使用自定义上游模型预设 ID"),
       permission_mode: z
         .enum(["auto", "readonly"])
@@ -2199,14 +2203,28 @@ registerAppTool(
   server,
   "alilas_ui_manage_profiles",
   {
-    title: "管理 ALilaS 默认模型与自定义上游（App 内部）",
-    description: "设置默认子代理引擎/模型，或增删自定义上游预设（仅存环境变量名，不存明文 Key）。",
+    title: "管理 ALilaS 默认模型与直连上游（App 内部）",
+    description: "设置默认子代理引擎/模型，增删直连 API 模型，或执行上游模型探测与工具兼容性测试（仅存环境变量名，不存明文 Key）。",
     inputSchema: {
-      action: z.enum(["set_default", "upsert_profile", "delete_profile", "refresh_drivers", "update_settings"]),
+      action: z.enum([
+        "set_default",
+        "upsert_profile",
+        "delete_profile",
+        "refresh_drivers",
+        "update_settings",
+        "discover_models",
+        "probe_tools",
+      ]),
       driver: z.string().optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profile_id: z.string().optional(),
+      base_url: z.string().optional(),
+      api_key_env: z.string().optional(),
+      api: z.enum(["openai-completions", "openai-responses", "anthropic-messages"]).optional(),
+      max_tokens: z.number().int().positive().optional(),
+      reasoning_enabled: z.boolean().optional(),
+      effort_map: z.record(z.string(), z.string()).optional(),
       settings: z
         .object({
           idleTimeoutSec: z.number().int().min(60).max(600).optional(),
@@ -2226,6 +2244,8 @@ registerAppTool(
           contextWindow: z.number().int().positive().optional(),
           maxTokens: z.number().int().positive().optional(),
           inputs: z.array(z.enum(["text", "image"])).optional(),
+          reasoningEnabled: z.boolean().optional(),
+          effortMap: z.record(z.string(), z.string()).optional(),
           effort: z.string().optional(),
         })
         .optional(),
@@ -2233,11 +2253,46 @@ registerAppTool(
     _meta: APP_ONLY_META,
   },
   async (args) => {
+    if (args.action === "discover_models") {
+      try {
+        const result = await discoverDirectModels({
+          baseURL: args.base_url || "",
+          apiKeyEnv: args.api_key_env || "",
+          api: args.api || "openai-completions",
+        });
+        return {
+          content: [{ type: "text", text: `discovered ${result.count} models` }],
+          structuredContent: { discovered: result },
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: e.message }],
+          structuredContent: { discovered: { ok: false, error: e.message, models: [] } },
+        };
+      }
+    }
+    if (args.action === "probe_tools") {
+      const probeResult = await probeDirectTools({
+        baseURL: args.base_url || "",
+        apiKeyEnv: args.api_key_env || "",
+        api: args.api || "openai-completions",
+        model: args.model || "",
+        maxTokens: args.max_tokens || 1024,
+        reasoningEnabled: Boolean(args.reasoning_enabled),
+        effort: args.effort || "",
+        effortMap: args.effort_map || null,
+      });
+      return {
+        content: [{ type: "text", text: probeResult.message }],
+        structuredContent: { probe: probeResult },
+      };
+    }
+
     if (args.action === "set_default") {
       profileStore.setDefaultSelection({
         driver: args.driver ?? "",
         model: args.model ?? "",
-        effort: args.effort ?? "high",
+        effort: args.effort ?? "",
         profileId: args.profile_id ?? "",
       });
     } else if (args.action === "upsert_profile" && args.profile) {

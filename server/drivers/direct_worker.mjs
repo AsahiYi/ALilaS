@@ -7,16 +7,23 @@
  *   - openai-responses    (/responses)
  *   - anthropic-messages  (/v1/messages)
  *
- * Emits normalized NDJSON events on stdout for ALilaS MCP Server.
- * Never prints or persists raw API keys (resolved strictly from process.env[apiKeyEnv]).
+ * Key guarantees:
+ *   - Preserves same-turn reasoning/thinking blocks & signatures across multi-step tool calls
+ *     (DeepSeek `reasoning_content`, OpenAI Responses `reasoning` items, Anthropic `thinking` + `signature`)
+ *   - Respects per-profile `reasoningEnabled` switch + custom `effortMap` (tier -> exact upstream API value)
+ *   - Retries pre-response transient network failures with exponential backoff (1s -> 2s -> 4s); never retries HTTP errors or mid-stream failures
+ *   - Async UTF-8 `run_command` capturing both stdout & stderr without blocking the event loop
+ *   - Never prints or persists raw API keys (resolved strictly from process.env[apiKeyEnv])
  */
-import { execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 const MAX_STEPS = 40;
 const MAX_TOOL_OUTPUT = 16_000;
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const CMD_TIMEOUT_MS = 60_000;
+const RETRY_DELAYS_MS = [1000, 2000, 4000];
 
 function emit(ev) {
   process.stdout.write(`${JSON.stringify(ev)}\n`);
@@ -36,7 +43,117 @@ function guessMime(fp) {
   return "";
 }
 
+function resolveMappedEffort({ reasoningEnabled, effort, effortMap }) {
+  if (reasoningEnabled === false) return "";
+  const tier = String(effort || "").trim();
+  if (!tier || tier.toLowerCase() === "off") return "";
+  if (effortMap && typeof effortMap === "object" && Object.prototype.hasOwnProperty.call(effortMap, tier)) {
+    const mapped = effortMap[tier];
+    if (mapped === null || mapped === undefined) return "";
+    const str = String(mapped).trim();
+    return str.toLowerCase() === "off" ? "" : str;
+  }
+  return tier;
+}
+
+/**
+ * Retry ONLY pre-response transient network errors (DNS / socket reset / ECONNREFUSED).
+ * Never retries redirect errors, HTTP error statuses, or mid-stream failures.
+ */
+async function fetchWithRetry(url, init) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await fetch(url, { ...init, redirect: "error" });
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || e || "");
+      const code = String(e?.cause?.code || e?.code || "");
+      const isDeterministic =
+        /redirect|invalid url|aborted|abort/i.test(msg) || e?.name === "AbortError";
+      if (isDeterministic || attempt >= RETRY_DELAYS_MS.length) {
+        const suffix = code ? ` [${code}]` : "";
+        throw new Error(`${msg}${suffix}`);
+      }
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  throw lastErr;
+}
+
+function killChildTree(child) {
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // ignore
+  }
+}
+
+function runShellCommand(cmdStr, cwd) {
+  return new Promise((resolve) => {
+    const isWin = process.platform === "win32";
+    const bin = isWin ? "powershell.exe" : "/bin/sh";
+    const psWrapped =
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " +
+      cmdStr;
+    const args = isWin ? ["-NoProfile", "-NonInteractive", "-Command", psWrapped] : ["-c", cmdStr];
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const child = spawn(bin, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChildTree(child);
+    }, CMD_TIMEOUT_MS);
+
+    child.stdout.on("data", (d) => {
+      if (stdout.length < MAX_TOOL_OUTPUT * 2) stdout += d.toString("utf8");
+    });
+    child.stderr.on("data", (d) => {
+      if (stderr.length < MAX_TOOL_OUTPUT * 2) stderr += d.toString("utf8");
+    });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ text: `Command spawn error: ${err.message}`, isError: true });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const parts = [];
+      if (stdout.trim()) parts.push(stdout.trimEnd());
+      if (stderr.trim()) parts.push(`[stderr]\n${stderr.trimEnd()}`);
+      if (timedOut) parts.push(`[timed out after ${CMD_TIMEOUT_MS / 1000}s]`);
+      const combined = parts.join("\n").slice(0, MAX_TOOL_OUTPUT) || "(no output)";
+      resolve({ text: combined, isError: timedOut || code !== 0 });
+    });
+  });
+}
+
 function buildToolDefs({ readonly, supportsImage }) {
+  // Deterministic tool ordering keeps upstream prompt-cache prefixes stable across turns.
   const tools = [
     {
       name: "read_file",
@@ -77,7 +194,7 @@ function buildToolDefs({ readonly, supportsImage }) {
       name: "run_command",
       description: readonly
         ? "Run a read-only shell command (inspection/search/status only; mutations forbidden)."
-        : "Execute a shell command inside the working directory and return stdout/stderr.",
+        : "Execute a shell command inside the working directory and return combined stdout/stderr.",
       parameters: {
         type: "object",
         properties: {
@@ -135,7 +252,7 @@ function buildToolDefs({ readonly, supportsImage }) {
   return tools;
 }
 
-function executeTool(name, args, { cwd, readonly, supportsImage }) {
+async function executeTool(name, args, { cwd, readonly, supportsImage }) {
   try {
     if (name === "read_file") {
       const fp = resolveSafePath(cwd, args.path);
@@ -233,25 +350,20 @@ function executeTool(name, args, { cwd, readonly, supportsImage }) {
     if (name === "run_command") {
       const cmdStr = String(args.command || "").trim();
       if (!cmdStr) return { text: "Error: empty command", isError: true };
-      if (readonly && /\b(rm|del|rmdir|remove-item|move-item|mv|cp|copy-item|set-content|out-file|git\s+(commit|push|reset|checkout|clean)|npm\s+install)\b/i.test(cmdStr)) {
+      if (
+        readonly &&
+        /\b(rm|del|rmdir|remove-item|move-item|mv|cp|copy-item|set-content|out-file|git\s+(commit|push|reset|checkout|clean)|npm\s+install)\b/i.test(
+          cmdStr,
+        )
+      ) {
         return { text: "Error: mutating command blocked in readonly mode.", isError: true };
       }
-      const shell = process.platform === "win32" ? "powershell.exe" : "/bin/sh";
-      const out = execSync(cmdStr, {
-        cwd,
-        shell,
-        encoding: "utf8",
-        timeout: 60_000,
-        maxBuffer: 4 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      return { text: (out || "(no output)").slice(0, MAX_TOOL_OUTPUT), isError: false };
+      return await runShellCommand(cmdStr, cwd);
     }
 
     return { text: `Error: unknown tool '${name}'`, isError: true };
   } catch (e) {
-    const out = [e.message, e.stdout, e.stderr].filter(Boolean).join("\n").slice(0, MAX_TOOL_OUTPUT);
-    return { text: out || String(e), isError: true };
+    return { text: String(e?.message || e).slice(0, MAX_TOOL_OUTPUT), isError: true };
   }
 }
 
@@ -301,13 +413,27 @@ function buildUrl(baseURL, suffix) {
 
 // ---------------------------------------------------------------- Protocol 1: OpenAI Chat Completions
 
-async function callOpenAICompletions({ baseURL, apiKey, model, effort, maxTokens, systemPrompt, history, tools, step }) {
+async function callOpenAICompletions({
+  baseURL,
+  apiKey,
+  model,
+  mappedEffort,
+  maxTokens,
+  systemPrompt,
+  history,
+  tools,
+  step,
+}) {
   const messages = [{ role: "system", content: systemPrompt }];
   for (const m of history) {
     if (m.role === "user") {
       messages.push({ role: "user", content: m.text });
     } else if (m.role === "assistant") {
       const msg = { role: "assistant", content: m.text || null };
+      // Preserve same-turn reasoning_content for DeepSeek/Kimi/Qwen reasoning tool loops
+      if (m.reasoning) {
+        msg.reasoning_content = m.reasoning;
+      }
       if (m.toolCalls?.length) {
         msg.tool_calls = m.toolCalls.map((tc) => ({
           id: tc.id,
@@ -334,30 +460,61 @@ async function callOpenAICompletions({ baseURL, apiKey, model, effort, maxTokens
     }
   }
 
-  const body = {
-    model,
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    tools: tools.map((t) => ({
-      type: "function",
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    })),
+  const preferMaxCompletion = /(?:^|[/:])(?:o[134]|gpt-[56])/i.test(model);
+  const buildBody = ({ useMaxCompletion, includeStreamOptions }) => {
+    const body = {
+      model,
+      messages,
+      stream: true,
+      ...(includeStreamOptions ? { stream_options: { include_usage: true } } : {}),
+      tools: tools.map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      })),
+    };
+    if (maxTokens) {
+      if (useMaxCompletion) body.max_completion_tokens = maxTokens;
+      else body.max_tokens = maxTokens;
+    }
+    if (mappedEffort) {
+      body.reasoning_effort = mappedEffort;
+    }
+    return body;
   };
-  if (maxTokens) body.max_tokens = maxTokens;
-  if (effort && ["low", "medium", "high"].includes(effort)) {
-    body.reasoning_effort = effort;
-  }
 
-  const res = await fetch(buildUrl(baseURL, "/chat/completions"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
+  const url = buildUrl(baseURL, "/chat/completions");
+  const headers = {
+    "Content-Type": "application/json",
+    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+  };
+
+  let opts = { useMaxCompletion: preferMaxCompletion, includeStreamOptions: true };
+  let res = await fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(buildBody(opts)) });
+
+  // Automatic single fallback when a strict relay rejects `stream_options` or `max_tokens`/`max_completion_tokens`
+  if (res.status === 400) {
+    const errText = await res.text();
+    let adjusted = false;
+    if (/stream_options/i.test(errText) && opts.includeStreamOptions) {
+      opts.includeStreamOptions = false;
+      adjusted = true;
+    }
+    if (/max_completion_tokens/i.test(errText) && !opts.useMaxCompletion) {
+      opts.useMaxCompletion = true;
+      adjusted = true;
+    } else if (/max_tokens/i.test(errText) && opts.useMaxCompletion) {
+      opts.useMaxCompletion = false;
+      adjusted = true;
+    }
+    if (adjusted) {
+      res = await fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(buildBody(opts)) });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
+      }
+    } else {
+      throw new Error(`HTTP 400: ${errText.slice(0, 400)}`);
+    }
+  } else if (!res.ok) {
     throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
   }
 
@@ -427,12 +584,26 @@ async function callOpenAICompletions({ baseURL, apiKey, model, effort, maxTokens
 
 // ---------------------------------------------------------------- Protocol 2: OpenAI Responses
 
-async function callOpenAIResponses({ baseURL, apiKey, model, effort, maxTokens, systemPrompt, history, tools, step }) {
+async function callOpenAIResponses({
+  baseURL,
+  apiKey,
+  model,
+  mappedEffort,
+  maxTokens,
+  systemPrompt,
+  history,
+  tools,
+  step,
+}) {
   const input = [];
   for (const m of history) {
     if (m.role === "user") {
       input.push({ role: "user", content: m.text });
     } else if (m.role === "assistant") {
+      // Preserve same-turn Responses reasoning items (with encrypted_content / summary)
+      for (const rItem of m.reasoningItems || []) {
+        input.push(rItem);
+      }
       if (m.text) {
         input.push({ role: "assistant", content: m.text });
       }
@@ -475,11 +646,11 @@ async function callOpenAIResponses({ baseURL, apiKey, model, effort, maxTokens, 
     })),
   };
   if (maxTokens) body.max_output_tokens = maxTokens;
-  if (effort && ["low", "medium", "high", "xhigh"].includes(effort)) {
-    body.reasoning = { effort };
+  if (mappedEffort) {
+    body.reasoning = { effort: mappedEffort };
   }
 
-  const res = await fetch(buildUrl(baseURL, "/responses"), {
+  const res = await fetchWithRetry(buildUrl(baseURL, "/responses"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -494,6 +665,7 @@ async function callOpenAIResponses({ baseURL, apiKey, model, effort, maxTokens, 
   let reasoning = "";
   let text = "";
   let usage = null;
+  const reasoningItems = [];
   const fcByItemId = new Map();
 
   for await (const sse of iterateSseEvents(res)) {
@@ -523,13 +695,17 @@ async function callOpenAIResponses({ baseURL, apiKey, model, effort, maxTokens, 
     } else if (evType === "response.function_call_arguments.delta" && typeof obj.delta === "string") {
       const slot = fcByItemId.get(obj.item_id);
       if (slot) slot.argsStr += obj.delta;
-    } else if (evType === "response.output_item.done" && obj.item?.type === "function_call") {
-      const key = obj.item.id || obj.item.call_id;
-      fcByItemId.set(key, {
-        id: obj.item.call_id || obj.item.id || `call_${step}_${fcByItemId.size}`,
-        name: obj.item.name || "",
-        argsStr: obj.item.arguments || fcByItemId.get(key)?.argsStr || "",
-      });
+    } else if (evType === "response.output_item.done" && obj.item) {
+      if (obj.item.type === "function_call") {
+        const key = obj.item.id || obj.item.call_id;
+        fcByItemId.set(key, {
+          id: obj.item.call_id || obj.item.id || `call_${step}_${fcByItemId.size}`,
+          name: obj.item.name || "",
+          argsStr: obj.item.arguments || fcByItemId.get(key)?.argsStr || "",
+        });
+      } else if (obj.item.type === "reasoning") {
+        reasoningItems.push(obj.item);
+      }
     } else if (evType === "response.completed" && obj.response?.usage) {
       const u = obj.response.usage;
       const rawIn = u.input_tokens ?? 0;
@@ -556,18 +732,32 @@ async function callOpenAIResponses({ baseURL, apiKey, model, effort, maxTokens, 
     return { id: tc.id, name: tc.name, args };
   });
 
-  return { reasoning, text, toolCalls, usage };
+  return { reasoning, reasoningItems, text, toolCalls, usage };
 }
 
 // ---------------------------------------------------------------- Protocol 3: Anthropic Messages
 
-async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens, systemPrompt, history, tools, step }) {
+async function callAnthropicMessages({
+  baseURL,
+  apiKey,
+  model,
+  mappedEffort,
+  maxTokens,
+  systemPrompt,
+  history,
+  tools,
+  step,
+}) {
   const messages = [];
   for (const m of history) {
     if (m.role === "user") {
       messages.push({ role: "user", content: m.text });
     } else if (m.role === "assistant") {
       const content = [];
+      // Preserve Anthropic thinking + signature blocks before tool_use within active turn
+      for (const tb of m.thinkingBlocks || []) {
+        content.push(tb);
+      }
       if (m.text) content.push({ type: "text", text: m.text });
       for (const tc of m.toolCalls || []) {
         content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args ?? {} });
@@ -596,7 +786,7 @@ async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens
     }
   }
 
-  const budgetMap = { low: 2048, medium: 6144, high: 12288, max: 24576 };
+  const budgetMap = { minimal: 1024, low: 2048, medium: 6144, high: 12288, xhigh: 16384, max: 24576 };
   const body = {
     model,
     system: systemPrompt,
@@ -609,11 +799,22 @@ async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens
       input_schema: t.parameters,
     })),
   };
-  if (effort && budgetMap[effort] && body.max_tokens > budgetMap[effort]) {
-    body.thinking = { type: "enabled", budget_tokens: budgetMap[effort] };
+
+  if (mappedEffort) {
+    const asNum = Number(mappedEffort);
+    const budget =
+      Number.isFinite(asNum) && asNum >= 1024
+        ? Math.floor(asNum)
+        : budgetMap[mappedEffort.toLowerCase()] || 0;
+    if (budget >= 1024) {
+      const capped = Math.min(budget, Math.max(1024, body.max_tokens - 512));
+      if (body.max_tokens > capped) {
+        body.thinking = { type: "enabled", budget_tokens: capped };
+      }
+    }
   }
 
-  const res = await fetch(buildUrl(baseURL, "/v1/messages"), {
+  const res = await fetchWithRetry(buildUrl(baseURL, "/v1/messages"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -629,7 +830,9 @@ async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens
   let reasoning = "";
   let text = "";
   const rawUsage = { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 };
-  const blocks = new Map();
+  const toolBlocks = new Map();
+  const thinkingMap = new Map();
+  const redactedBlocks = [];
 
   for await (const sse of iterateSseEvents(res)) {
     let obj;
@@ -649,27 +852,48 @@ async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens
       if (typeof obj.usage.output_tokens === "number") rawUsage.output = obj.usage.output_tokens;
     } else if (evType === "content_block_start" && obj.content_block) {
       if (obj.content_block.type === "tool_use") {
-        blocks.set(obj.index, {
+        toolBlocks.set(obj.index, {
           id: obj.content_block.id || `tu_${step}_${obj.index}`,
           name: obj.content_block.name || "",
           argsStr: "",
+        });
+      } else if (obj.content_block.type === "thinking") {
+        thinkingMap.set(obj.index, {
+          type: "thinking",
+          thinking: obj.content_block.thinking || "",
+          signature: obj.content_block.signature || "",
+        });
+      } else if (obj.content_block.type === "redacted_thinking") {
+        redactedBlocks.push({
+          type: "redacted_thinking",
+          data: obj.content_block.data || "",
         });
       }
     } else if (evType === "content_block_delta" && obj.delta) {
       if (obj.delta.type === "thinking_delta" && obj.delta.thinking) {
         reasoning += obj.delta.thinking;
+        const tb = thinkingMap.get(obj.index);
+        if (tb) tb.thinking += obj.delta.thinking;
         emit({ type: "reasoning_delta", step, text: obj.delta.thinking });
+      } else if (obj.delta.type === "signature_delta" && obj.delta.signature) {
+        const tb = thinkingMap.get(obj.index);
+        if (tb) tb.signature += obj.delta.signature;
       } else if (obj.delta.type === "text_delta" && obj.delta.text) {
         text += obj.delta.text;
         emit({ type: "text_delta", step, text: obj.delta.text });
       } else if (obj.delta.type === "input_json_delta" && obj.delta.partial_json) {
-        const slot = blocks.get(obj.index);
+        const slot = toolBlocks.get(obj.index);
         if (slot) slot.argsStr += obj.delta.partial_json;
       }
     }
   }
 
-  const toolCalls = Array.from(blocks.values()).map((tc) => {
+  const thinkingBlocks = [
+    ...Array.from(thinkingMap.values()).filter((tb) => tb.thinking || tb.signature),
+    ...redactedBlocks,
+  ];
+
+  const toolCalls = Array.from(toolBlocks.values()).map((tc) => {
     let args = {};
     try {
       args = tc.argsStr ? JSON.parse(tc.argsStr) : {};
@@ -691,7 +915,7 @@ async function callAnthropicMessages({ baseURL, apiKey, model, effort, maxTokens
         }
       : null;
 
-  return { reasoning, text, toolCalls, usage };
+  return { reasoning, thinkingBlocks, text, toolCalls, usage };
 }
 
 // ---------------------------------------------------------------- Main Runner
@@ -707,6 +931,11 @@ async function main() {
   const supportsImage = Array.isArray(cfg.inputs) ? cfg.inputs.includes("image") : false;
   const api = cfg.api || "openai-completions";
   const apiKey = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] || "" : "";
+  const mappedEffort = resolveMappedEffort({
+    reasoningEnabled: cfg.reasoningEnabled,
+    effort: cfg.effort,
+    effortMap: cfg.effortMap,
+  });
 
   emit({ type: "session", sessionId, cwd, model: cfg.model });
   emit({ type: "status", phase: "session_ready", turn: 1, step: 0 });
@@ -723,7 +952,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Load persisted direct conversation history if resuming
   let history = [];
   if (cfg.historyPath && fs.existsSync(cfg.historyPath)) {
     try {
@@ -765,7 +993,7 @@ async function main() {
         baseURL: cfg.baseURL,
         apiKey,
         model: cfg.model,
-        effort: cfg.effort,
+        mappedEffort,
         maxTokens: cfg.maxTokens,
         systemPrompt,
         history,
@@ -773,7 +1001,7 @@ async function main() {
         step,
       });
     } catch (e) {
-      emit({ type: "error", message: `直连请求失败 (${api}): ${e.message}` });
+      emit({ type: "error", message: `直连请求失败 [${api} / ${cfg.model}]: ${e.message}` });
       process.exit(1);
     }
 
@@ -794,6 +1022,9 @@ async function main() {
       role: "assistant",
       text: result.text || "",
       toolCalls: result.toolCalls || [],
+      ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+      ...(result.thinkingBlocks?.length ? { thinkingBlocks: result.thinkingBlocks } : {}),
+      ...(result.reasoningItems?.length ? { reasoningItems: result.reasoningItems } : {}),
     });
 
     if (!result.toolCalls || result.toolCalls.length === 0) {
@@ -810,7 +1041,7 @@ async function main() {
         step,
         time: tStart,
       });
-      const out = executeTool(tc.name, tc.args || {}, { cwd, readonly, supportsImage });
+      const out = await executeTool(tc.name, tc.args || {}, { cwd, readonly, supportsImage });
       const tEnd = Date.now();
       emit({
         type: "tool_end",
@@ -832,11 +1063,17 @@ async function main() {
     }
   }
 
-  // Persist compact conversation history (strip large base64 images to keep disk light)
+  // Persist compact conversation history across turns (strip base64 images & ephemeral reasoning artifacts)
   if (cfg.historyPath) {
     try {
       fs.mkdirSync(path.dirname(cfg.historyPath), { recursive: true });
-      const slim = history.slice(-80).map((m) => (m.image ? { ...m, image: undefined } : m));
+      const slim = history.slice(-80).map((m) => ({
+        role: m.role,
+        ...(m.text !== undefined ? { text: m.text } : {}),
+        ...(m.toolCalls?.length ? { toolCalls: m.toolCalls } : {}),
+        ...(m.callId ? { callId: m.callId } : {}),
+        ...(m.isError ? { isError: true } : {}),
+      }));
       fs.writeFileSync(cfg.historyPath, JSON.stringify({ sessionId, messages: slim }), "utf8");
     } catch {
       // ignore disk errors

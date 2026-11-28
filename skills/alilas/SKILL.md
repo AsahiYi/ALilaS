@@ -17,7 +17,7 @@ Use the `alilas_alilas` MCP server tools whenever heavy implementation, batch sc
 3. **Start (`alilas_start_task`)**:
    - Keep `task` tight and concrete (~200–800 chars, single objective): verified absolute paths, exact edits/boundaries, one verification command, and a stop-on-block rule (stop after 3 identical failures and report).
    - Explicitly note headless execution authorization so workspace coordinator rules (e.g., "ask before editing") do not cause hesitation.
-   - Optionally pass `driver`, `model`, `effort` (leave default for hard tasks; use `"medium"` only for straightforward mechanical subtasks), `profile_id`, and `permission_mode` (`"auto"` or `"readonly"`). Concurrent sessions never conflict.
+   - Leave `driver`, `model`, and `effort` unset by default to strictly honor the user's configured model & thinking effort (never silently downgrade effort unless the user explicitly asks); optionally pass `profile_id` and `permission_mode` (`"auto"` or `"readonly"`). Concurrent sessions never conflict.
    - Keep `timeout_sec: 0` (no hard wall-clock kill) and `idle_timeout_sec: 180`.
 4. **Focus Side Pane (`alilas_open_pane`)**:
    - Call `alilas_open_pane(session_id, cwd)` so the right-hand ALilaS pane locks onto the active project.

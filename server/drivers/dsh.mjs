@@ -200,7 +200,8 @@ export function parseProvidersFromYaml(text) {
           contextWindow: inferContextWindow(modelId, 200_000),
           maxTokens: 64_000,
           inputs: ["text", "image"],
-          efforts: ["low", "medium", "high"],
+          hasReasoning: false,
+          efforts: [],
           effortMap: null,
         };
         curProv.models.push(curModel);
@@ -211,9 +212,10 @@ export function parseProvidersFromYaml(text) {
     if (!curModel) continue;
 
     if (inEfforts) {
-      const ekv = trimmed.match(/^(off|low|medium|high|xhigh|max):\s*(.*)$/i);
+      const ekv = trimmed.match(/^([A-Za-z0-9._-]+):\s*(.*)$/);
       if (ekv) {
-        const ek = ekv[1].toLowerCase();
+        const ek = ekv[1];
+        const lowerK = ek.toLowerCase();
         const rawEv = ekv[2].trim();
         const lowerEv = rawEv.toLowerCase();
         if (!curModel._parsedEffortMap) curModel._parsedEffortMap = {};
@@ -223,7 +225,7 @@ export function parseProvidersFromYaml(text) {
             : rawEv === "{}"
               ? ek
               : unquoteYaml(rawEv);
-        if (ek !== "off" && lowerEv !== "null" && !curModel._parsedEfforts.includes(ek)) {
+        if (lowerK !== "off" && lowerEv !== "null" && !curModel._parsedEfforts.includes(ek)) {
           curModel._parsedEfforts.push(ek);
         }
       }
@@ -262,9 +264,11 @@ export function parseProvidersFromYaml(text) {
       m.providerLabel = p.displayName || p.key;
       if (Array.isArray(m._parsedEfforts) && m._parsedEfforts.length > 0) {
         m.efforts = m._parsedEfforts;
+        m.hasReasoning = true;
       }
       if (m._parsedEffortMap && Object.keys(m._parsedEffortMap).length > 0) {
         m.effortMap = m._parsedEffortMap;
+        m.hasReasoning = true;
       }
       if (Array.isArray(m._parsedInputs) && m._parsedInputs.length > 0) {
         m.inputs = m._parsedInputs;
@@ -402,6 +406,7 @@ function resolveDiscoveredModel({ pluginRoot, model, provider }) {
         contextWindow: found.contextWindow || 200_000,
         maxTokens: found.maxTokens || 64_000,
         inputs: Array.isArray(found.inputs) && found.inputs.length ? found.inputs : ["text", "image"],
+        hasReasoning: Boolean(found.hasReasoning),
         effortMap: found.effortMap || null,
       };
     }
@@ -425,13 +430,18 @@ function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, prof
   if (resolved?.baseURL && resolved?.provider && resolved?.model) {
     const inputs =
       Array.isArray(resolved.inputs) && resolved.inputs.length ? resolved.inputs : ["text", "image"];
-    const effortMap =
-      resolved.effortMap && Object.keys(resolved.effortMap).length
-        ? resolved.effortMap
-        : { off: null, low: "low", medium: "medium", high: "high" };
-    const effortLines = Object.entries(effortMap).map(([k, v]) =>
-      v === null ? `              ${k}: null` : `              ${k}: ${JSON.stringify(v)}`,
-    );
+    const hasEffortMap =
+      resolved.effortMap && typeof resolved.effortMap === "object" && Object.keys(resolved.effortMap).length > 0;
+    const effortBlock = hasEffortMap
+      ? [
+          `            reasoningEfforts:`,
+          ...Object.entries(resolved.effortMap).map(([k, v]) =>
+            v === null || v === ""
+              ? `              ${k}: null`
+              : `              ${k}: ${JSON.stringify(v)}`,
+          ),
+        ]
+      : [];
     entries.push(
       `- id: credentials\n  disabled: false`,
       `- id: tool-result-pruner\n  disabled: true`,
@@ -452,15 +462,15 @@ function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, prof
         `            maxTokens: ${Number(resolved.maxTokens) || 64_000}`,
         `            input:`,
         ...inputs.map((inp) => `              - ${inp}`),
-        `            reasoningEfforts:`,
-        ...effortLines,
+        ...effortBlock,
       ].join("\n"),
     );
   }
 
   const targetProvider = resolved?.provider || profile?.provider || undefined;
   const targetModel = resolved?.model || profile?.model || model || undefined;
-  const targetEffort = effort || profile?.effort || undefined;
+  const allowEffort = !resolved || resolved.hasReasoning !== false;
+  const targetEffort = allowEffort ? effort || profile?.effort || undefined : undefined;
 
   if (targetModel || targetProvider || targetEffort) {
     const cfgLines = [
@@ -470,8 +480,10 @@ function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, prof
     ];
     if (targetProvider) cfgLines.push(`    provider: ${JSON.stringify(targetProvider)}`);
     if (targetModel) cfgLines.push(`    model: ${JSON.stringify(targetModel)}`);
-    if (targetEffort && ["off", "low", "medium", "high", "xhigh", "max"].includes(targetEffort)) {
-      cfgLines.push(`    reasoningEffort: ${targetEffort === "off" ? "null" : targetEffort}`);
+    if (targetEffort && /^[A-Za-z0-9._-]{1,40}$/.test(targetEffort)) {
+      cfgLines.push(
+        `    reasoningEffort: ${targetEffort.toLowerCase() === "off" ? "null" : JSON.stringify(targetEffort)}`,
+      );
     }
     entries.push(cfgLines.join("\n"));
   }

@@ -145,6 +145,17 @@ export function createProfileStore(dataDir) {
     return { ...data.settings };
   }
 
+  function sanitizeEffortMap(rawMap) {
+    if (!rawMap || typeof rawMap !== "object" || Array.isArray(rawMap)) return null;
+    const out = {};
+    for (const [rawK, rawV] of Object.entries(rawMap)) {
+      const k = String(rawK || "").trim().replace(/[^A-Za-z0-9._-]/g, "").slice(0, 32);
+      if (!k) continue;
+      out[k] = rawV === null || rawV === undefined ? "" : String(rawV).trim().slice(0, 64);
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
   function upsertCustomProfile(profile) {
     const id =
       (profile.id || "").trim() ||
@@ -155,6 +166,21 @@ export function createProfileStore(dataDir) {
       ? Array.from(new Set(profile.inputs.filter((x) => x === "text" || x === "image")))
       : ["text", "image"];
     if (!inputs.includes("text")) inputs.unshift("text");
+    const reasoningEnabled =
+      typeof profile.reasoningEnabled === "boolean" ? profile.reasoningEnabled : true;
+    const parsedMap = sanitizeEffortMap(profile.effortMap);
+    const effortMap = reasoningEnabled
+      ? parsedMap || { off: "", low: "low", medium: "medium", high: "high" }
+      : parsedMap || {};
+    const effortKeys = Object.keys(effortMap);
+    let effort = String(profile.effort ?? "").trim();
+    if (!reasoningEnabled) {
+      effort = "";
+    } else if (!effort || (effortKeys.length && !effortKeys.includes(effort))) {
+      effort = effortKeys.includes("high")
+        ? "high"
+        : effortKeys.find((k) => k !== "off" && k !== "none") || effortKeys[0] || "";
+    }
     const clean = {
       id,
       name: String(profile.name || profile.model || id).trim().slice(0, 60),
@@ -170,7 +196,9 @@ export function createProfileStore(dataDir) {
       contextWindow: Number(profile.contextWindow) || inferContextWindow(profile.model, 200_000),
       maxTokens: Number(profile.maxTokens) || 64_000,
       inputs,
-      effort: String(profile.effort || "high").trim(),
+      reasoningEnabled,
+      effortMap,
+      effort,
     };
     const idx = data.customProfiles.findIndex((p) => p.id === id);
     if (idx >= 0) data.customProfiles[idx] = clean;
