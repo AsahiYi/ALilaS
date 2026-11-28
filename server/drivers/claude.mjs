@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { findExecutableOnPath, inferContextWindow } from "./utils.mjs";
 
 export const id = "claude";
@@ -8,6 +11,27 @@ export const DEFAULT_MODELS = [
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200_000 },
   { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200_000 },
 ];
+
+export function discoverUpstreamModels() {
+  const models = DEFAULT_MODELS.map((m) => ({ ...m }));
+  try {
+    const cfgPath = path.join(os.homedir(), ".claude", "settings.json");
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      const active = (cfg?.model || cfg?.env?.ANTHROPIC_MODEL || "").trim();
+      if (active && !models.some((m) => m.id === active)) {
+        models.unshift({
+          id: active,
+          name: `${active} (上游配置)`,
+          contextWindow: inferContextWindow(active, 200_000),
+        });
+      }
+    }
+  } catch {
+    // ignore unreadable settings
+  }
+  return models;
+}
 
 export function resolveCommand() {
   const envBin = (process.env.ALILAS_CLAUDE_BIN || "").trim();
@@ -25,9 +49,9 @@ export function detect() {
     installed: Boolean(cmd),
     command: cmd,
     detail: cmd
-      ? "Ready (supports native login & ccswitch/ANTHROPIC_BASE_URL relays)"
+      ? "Ready (inherits ~/.claude/settings.json & CCSwitch relays)"
       : "claude CLI not installed (npm i -g @anthropic-ai/claude-code)",
-    models: DEFAULT_MODELS,
+    models: discoverUpstreamModels(),
   };
 }
 

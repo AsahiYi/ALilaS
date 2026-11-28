@@ -1,6 +1,6 @@
 ---
 name: alilas
-description: Delegate coding, auditing, or verification subtasks to ALilaS (multi-engine better-subagent for Antigravity supporting agy, DSH, Claude Code, and Codex CLI) with per-run model selection, live ring/TPS/token telemetry, project isolation, and stall recovery.
+description: Delegate coding, auditing, or verification subtasks to ALilaS (multi-engine better-subagent for Antigravity supporting agy, DSH, Claude Code, Codex CLI, and zero-injection Direct API) with per-run model selection, live ring/TPS/token telemetry, project isolation, and stall recovery.
 ---
 
 # ALilaS (`better-subagent`) Delegation Guide
@@ -13,7 +13,7 @@ Use the `alilas_alilas` MCP server tools whenever heavy implementation, batch sc
    - Do trivial 1–3 step lookups directly instead of delegating.
    - Before dispatching, verify exact file paths, real environment/service names, and OS shell dialect (e.g., PowerShell 5.1 vs bash) so the subagent never wastes turns guessing.
 2. **Discover Models (`alilas_list_models`, optional)**:
-   - View installed engines (`agy`, `dsh`, `claude`, `codex`), native Antigravity models, and user-defined custom upstream profiles.
+   - View installed engines (`agy`, `dsh`, `claude`, `codex`, `direct`), native Antigravity models, and user-defined Direct API profiles.
 3. **Start (`alilas_start_task`)**:
    - Keep `task` tight and concrete (~200–800 chars, single objective): verified absolute paths, exact edits/boundaries, one verification command, and a stop-on-block rule (stop after 3 identical failures and report).
    - Explicitly note headless execution authorization so workspace coordinator rules (e.g., "ask before editing") do not cause hesitation.

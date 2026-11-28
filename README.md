@@ -8,10 +8,10 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Antigravity-better--subagent-8B5CF6?style=flat-square" alt="better-subagent" />
-  <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex-34D399?style=flat-square" alt="4 Drivers" />
+  <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex%20%7C%20Direct-34D399?style=flat-square" alt="5 Engines" />
   <img src="https://img.shields.io/badge/MCP%20Apps-SEP--1865-60A5FA?style=flat-square" alt="MCP App" />
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22.15-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/Version-3.2.4-A78BFA?style=flat-square" alt="v3.2.4" />
+  <img src="https://img.shields.io/badge/Version-3.3.0-A78BFA?style=flat-square" alt="v3.3.0" />
   <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
 </p>
 
@@ -19,7 +19,7 @@
 
 **ALilaS** (**A**ntigravity + **LilaS**) is a native multi-engine **subagent orchestration studio** (`better-subagent`) for **Antigravity**, built on the **MCP Apps (SEP-1865)** specification.
 
-It unifies **Antigravity Native (`agy`)**, **DeepSeek Harness (`dsh`)**, **Claude Code (`claude`)**, and **OpenAI Codex CLI (`codex`)** behind a workspace-isolated side pane and inline chat card — featuring **process-isolated concurrent model routing**, **token-level streaming reasoning visualization**, **structured tool execution traces**, **exact native telemetry**, and **automated stall detection & recovery**.
+It unifies **Antigravity Native (`agy`)**, **DeepSeek Harness (`dsh`)**, **Claude Code (`claude`)**, **OpenAI Codex CLI (`codex`)**, and a built-in zero-injection **Direct API (`direct`)** engine behind a workspace-isolated side pane and inline chat card — featuring **process-isolated concurrent model routing**, **token-level streaming reasoning visualization**, **structured tool execution traces**, **exact native telemetry**, and **automated stall detection & recovery**.
 
 <p align="center">
   <img src="assets/showcase/hero-showcase.png" alt="ALilaS in Antigravity IDE Showcase" width="100%" />
@@ -29,10 +29,11 @@ It unifies **Antigravity Native (`agy`)**, **DeepSeek Harness (`dsh`)**, **Claud
 
 ## Key Capabilities
 
-### 1. Unified Multi-Engine Orchestration (`AGY` · `DSH` · `Claude` · `Codex`)
+### 1. Unified Multi-Engine Orchestration (`AGY` · `DSH` · `Claude` · `Codex` · `Direct API`)
 - **Antigravity Native (`agy`)**: Auto-discovers all native Antigravity models via `agy models` (Gemini 4 Neon / Carbon / Argon / Hydrogen, Orchestrator, Claude Opus / Sonnet 5.5, GPT-OSS 120B), deduplicating variants by base model with inline **Thinking Effort** controls — zero extra API keys required.
-- **DeepSeek Harness (`dsh`)**: Mode A headless execution paired with a non-invasive local Cordis streaming probe (`stream_probe.mjs`) and 1M context support. Includes a read-only YAML parser that automatically discovers multi-provider upstreams from `~/.dsh/profiles/desktop/cordis.patch.yml`.
-- **Claude Code (`claude`) & Codex CLI (`codex`)**: Native `stream-json` and `exec --json` protocol adapters with automatic CLI detection and zero-config compatibility with native logins, `~/.codex/config.toml`, `~/.claude/settings.json`, and **CCSwitch** relays.
+- **DeepSeek Harness (`dsh`)**: Mode A headless execution paired with a non-invasive local Cordis streaming probe (`stream_probe.mjs`) and read-only YAML discovery from `~/.dsh/profiles/desktop/cordis.patch.yml` (preserving exact `contextWindow`, `input` vision flags, `reasoningEfforts` mappings, and official `sandbox-policy: read-only`).
+- **Claude Code (`claude`) & Codex CLI (`codex`)**: Native `stream-json` and `exec --json` protocol adapters with automatic CLI & active model discovery from `~/.claude/settings.json` and `~/.codex/config.toml` (fully compatible with **CCSwitch** relays).
+- **Direct API (`direct`, zero external CLI / zero third-party injection)**: Built-in zero-dependency Node 22 SSE headless worker supporting **OpenAI Chat Completions**, **OpenAI Responses**, and **Anthropic Messages** with a minimal workspace tool loop (`read_file`, `list_dir`, `grep_search`, `run_command`, `edit_file`, `write_file`, and optional `read_image` gated by the model's vision checkbox).
 
 ### 2. Process-Isolated Concurrent Model Routing
 - Pin any native model, discovered DSH upstream, or custom preset as your global default inside **Model & Settings**, while overriding engine, model, and reasoning effort per session with zero cross-session interference.
@@ -73,10 +74,11 @@ flowchart LR
     D2["drivers/dsh.mjs<br/>dsh --profile headless --json + stream_probe"]
     D3["drivers/claude.mjs<br/>claude -p --output-format stream-json"]
     D4["drivers/codex.mjs<br/>codex exec --json"]
+    D5["drivers/direct.mjs<br/>Zero-CLI Direct API SSE Worker"]
 
     Coord -->|"start / wait / stop / list_models / open_pane"| MCP
-    MCP --> D1 & D2 & D3 & D4
-    D1 & D2 & D3 & D4 -->|"Normalized NDJSON Event Stream"| MCP
+    MCP --> D1 & D2 & D3 & D4 & D5
+    D1 & D2 & D3 & D4 & D5 -->|"Normalized NDJSON Event Stream"| MCP
     MCP <--> Store
     UI <-->|"alilas_poll_state (ETag) / dispatch / stop / profiles"| MCP
 ```

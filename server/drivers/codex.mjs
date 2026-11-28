@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { findExecutableOnPath, inferContextWindow } from "./utils.mjs";
 
 export const id = "codex";
@@ -9,6 +12,28 @@ export const DEFAULT_MODELS = [
   { id: "o3", name: "o3", contextWindow: 200_000 },
   { id: "o4-mini", name: "o4-mini", contextWindow: 200_000 },
 ];
+
+export function discoverUpstreamModels() {
+  const models = DEFAULT_MODELS.map((m) => ({ ...m }));
+  try {
+    const cfgPath = path.join(os.homedir(), ".codex", "config.toml");
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf8");
+      const m = raw.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
+      const active = m?.[1]?.trim() || "";
+      if (active && !models.some((x) => x.id === active)) {
+        models.unshift({
+          id: active,
+          name: `${active} (上游配置)`,
+          contextWindow: inferContextWindow(active, 400_000),
+        });
+      }
+    }
+  } catch {
+    // ignore unreadable config.toml
+  }
+  return models;
+}
 
 export function resolveCommand() {
   const envBin = (process.env.ALILAS_CODEX_BIN || "").trim();
@@ -26,9 +51,9 @@ export function detect() {
     installed: Boolean(cmd),
     command: cmd,
     detail: cmd
-      ? "Ready (inherits ~/.codex/config.toml & ccswitch relays)"
+      ? "Ready (inherits ~/.codex/config.toml & CCSwitch relays)"
       : "codex CLI not installed (npm i -g @openai/codex)",
-    models: DEFAULT_MODELS,
+    models: discoverUpstreamModels(),
   };
 }
 
@@ -51,7 +76,7 @@ export function buildInvocation({
   }
   args.push("--json");
   if (permissionMode === "readonly") {
-    args.push("--sandbox", "read-only");
+    args.push("-c", "sandbox_mode=read-only");
   } else {
     args.push("--full-auto");
   }

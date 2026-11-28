@@ -254,6 +254,10 @@ function createParserState(filePath) {
     title: "",
     titleIsFallback: false,
     firstPromptLine: "",
+    provider: "",
+    model: "",
+    effort: "",
+    contextWindow: 0,
     agentPreset: null,
     origin: null,
     parentSession: null,
@@ -265,6 +269,7 @@ function createParserState(filePath) {
     textCount: 0,
     frameCount: 0,
     tornTail: false,
+    inFlight: false,
     lastTurnEnd: null,
     lastAssistantText: "",
     latestUsage: null,
@@ -307,6 +312,17 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     if (ev.parentSession) state.parentSession = ev.parentSession;
   } else if (type === "agent-preset/selected") {
     if (d.agentPreset) state.agentPreset = d.agentPreset;
+  } else if (type === "request/context") {
+    if (d.provider) state.provider = String(d.provider);
+    if (d.model) state.model = String(d.model);
+    if (typeof d.contextWindow === "number" && d.contextWindow > 0) {
+      state.contextWindow = d.contextWindow;
+    }
+  } else if (type === "request/header") {
+    const cfg = d.header?.config || d.config || {};
+    if (cfg.provider) state.provider = String(cfg.provider);
+    if (cfg.model) state.model = String(cfg.model);
+    if (cfg.reasoningEffort) state.effort = String(cfg.reasoningEffort);
   } else if (type === "session/title") {
     const rawTitle = typeof d.title === "string" ? d.title.trim() : "";
     const isFallback = d.source?.kind === "fallback";
@@ -321,10 +337,13 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     }
   } else if (type === "turn/start") {
     state.currentTurn = d.turn ?? state.currentTurn + 1;
+    state.inFlight = true;
   } else if (type === "step/start") {
     state.currentStep = d.step ?? state.currentStep + 1;
     state.stepStartTime = time;
+    state.inFlight = true;
   } else if (type === "turn/end") {
+    state.inFlight = false;
     state.lastTurnEnd = { turn: d.turn ?? state.currentTurn, reason: d.reason || null };
     if (d.reason?.kind === "error") {
       state.allItems.push({
@@ -340,24 +359,43 @@ function parseEventLine(state, line, { maxToolResultLen, maxReasoningLen }) {
     const msg = d.message || d;
     const text = extractTextFromContent(msg.content);
     if (!isNoiseUserPrompt(text)) {
-      if (!state.firstPromptLine) {
-        const firstLine = extractFirstPromptLine(text, 160);
-        if (firstLine) {
-          state.firstPromptLine = firstLine;
-          if (!state.title || (state.titleIsFallback && firstLine.length > state.title.length)) {
-            state.title = firstLine;
+      const trimmed = text.trim();
+      if (trimmed.startsWith("<system-reminder")) {
+        const systemLabel = trimmed.includes("<available_skills>")
+          ? "DSH 系统注入 · 可用 Skills 目录"
+          : /AGENTS\.md|ACTIVE and MANDATORY/i.test(trimmed)
+            ? "DSH 系统注入 · 规则与契约上下文"
+            : "DSH 系统注入 · 运行提示";
+        state.allItems.push({
+          kind: "system",
+          seq,
+          turn: state.currentTurn,
+          step: state.currentStep,
+          time,
+          label: systemLabel,
+          text: truncate(trimmed, 4000),
+          charCount: trimmed.length,
+        });
+      } else {
+        if (!state.firstPromptLine) {
+          const firstLine = extractFirstPromptLine(text, 160);
+          if (firstLine) {
+            state.firstPromptLine = firstLine;
+            if (!state.title || (state.titleIsFallback && firstLine.length > state.title.length)) {
+              state.title = firstLine;
+            }
           }
         }
+        state.allItems.push({
+          kind: "user",
+          seq,
+          turn: state.currentTurn,
+          step: state.currentStep,
+          time,
+          text: truncate(text, 4000),
+          charCount: text.length,
+        });
       }
-      state.allItems.push({
-        kind: "user",
-        seq,
-        turn: state.currentTurn,
-        step: state.currentStep,
-        time,
-        text: truncate(text, 4000),
-        charCount: text.length,
-      });
     }
   } else if (type === "assistant/message") {
     if (d.usage && typeof d.usage === "object") {
@@ -671,12 +709,19 @@ export function parseSessionFile(filePath, opts = {}) {
   const isHeadless = !st.agentPreset || st.agentPreset !== "standard";
   const truncatedItems = st.allItems.length > maxItems;
   const items = truncatedItems ? st.allItems.slice(-maxItems) : st.allItems;
+  const modelComposite =
+    st.provider && st.model ? `${st.provider}/${st.model}` : st.model || "";
+  const interrupted = Boolean(st.inFlight);
 
   return {
     sessionId: st.sessionId,
     filePath,
     cwd: st.cwd,
     title: st.title || st.sessionId,
+    model: modelComposite,
+    effort: st.effort || "",
+    contextWindow: st.contextWindow || 0,
+    interrupted,
     createdAt: st.createdAt,
     mtimeMs: stat.mtimeMs,
     sizeBytes: stat.size,

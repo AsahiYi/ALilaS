@@ -4,7 +4,7 @@ This rule is injected automatically by the **ALilaS** plugin (`alilas`) across a
 
 ## 1. Roles & Delegation Boundary
 - **Antigravity (Coordinator)**: Owns user alignment, architecture, quick read-only grounding, task scoping, boundary enforcement, independent verification, and final reporting.
-- **ALilaS (Multi-Engine Subagent)**: Owns heavy coding implementation, multi-file refactors, batch scripts, data audits, regression testing, and cross-verification via the user's selected engine (`agy` / `dsh` / `claude` / `codex`).
+- **ALilaS (Multi-Engine Subagent)**: Owns heavy coding implementation, multi-file refactors, batch scripts, data audits, regression testing, and cross-verification via the user's selected engine (`agy` / `dsh` / `claude` / `codex` / `direct`).
 - **Don't Over-Delegate**: Handle trivial 1–3 step lookups or single-line config checks directly in the Coordinator instead of spinning up a subagent.
 
 ## 2. High-Signal Task Brief Discipline

@@ -8,10 +8,10 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Antigravity-better--subagent-8B5CF6?style=flat-square" alt="better-subagent" />
-  <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex-34D399?style=flat-square" alt="4 Drivers" />
+  <img src="https://img.shields.io/badge/Engines-AGY%20%7C%20DSH%20%7C%20Claude%20%7C%20Codex%20%7C%20Direct-34D399?style=flat-square" alt="5 Engines" />
   <img src="https://img.shields.io/badge/MCP%20Apps-SEP--1865-60A5FA?style=flat-square" alt="MCP App" />
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22.15-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/Version-3.2.4-A78BFA?style=flat-square" alt="v3.2.4" />
+  <img src="https://img.shields.io/badge/Version-3.3.0-A78BFA?style=flat-square" alt="v3.3.0" />
   <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
 </p>
 
@@ -19,7 +19,7 @@
 
 **ALilaS**（**A**ntigravity + **LilaS**）是一款面向 **Antigravity** 的原生多引擎子代理工作台（`better-subagent`），基于 **MCP Apps（SEP-1865）** 规范构建。
 
-它将 **Antigravity 原生（`agy`）**、**DeepSeek Harness（`dsh`）**、**Claude Code（`claude`）** 与 **OpenAI Codex CLI（`codex`）** 四大无头智能体引擎统一收敛于一套工作区隔离的原生侧边栏与内联卡片架构中，提供 **进程级并发模型路由**、**Token 级实时流式推理可视化**、**结构化工具调用链路追踪**、**原生精度上下文与吞吐遥测** 以及 **静默异常自动检测与容错恢复**。
+它将 **Antigravity 原生（`agy`）**、**DeepSeek Harness（`dsh`）**、**Claude Code（`claude`）**、**OpenAI Codex CLI（`codex`）** 以及内置零注入 **直连 API（`direct`）** 五大无头智能体引擎统一收敛于一套工作区隔离的原生侧边栏与内联卡片架构中，提供 **进程级并发模型路由**、**Token 级实时流式推理可视化**、**结构化工具调用链路追踪**、**原生精度上下文与吞吐遥测** 以及 **静默异常自动检测与容错恢复**。
 
 <p align="center">
   <img src="assets/showcase/hero-showcase.png" alt="ALilaS in Antigravity IDE Showcase" width="100%" />
@@ -29,10 +29,11 @@
 
 ## 核心能力
 
-### 1. 统一多引擎调度层（`AGY` · `DSH` · `Claude` · `Codex`）
+### 1. 统一多引擎调度层（`AGY` · `DSH` · `Claude` · `Codex` · `Direct API`）
 - **Antigravity Native (`agy`)**：动态探测全量原生模型（Gemini 4 Neon / Carbon / Argon / Hydrogen、Orchestrator、Claude Opus / Sonnet 5.5、GPT-OSS 120B），按基名自动归类并折叠 **Thinking Effort** 推理档位，无需额外配置外部 API Key。
-- **DeepSeek Harness (`dsh`)**：采用官方 Mode A 无头执行与零侵入本地 Cordis 探针（`stream_probe.mjs`），支持 1M 上下文窗口；内置只读配置解析器，可自动发现 `~/.dsh/profiles/desktop/cordis.patch.yml` 中的多渠道上游与模型。
-- **Claude Code (`claude`) & Codex CLI (`codex`)**：原生对接 `stream-json` 与 `exec --json` 协议，自动检测 CLI 环境，无缝兼容官方登录态、`~/.codex/config.toml`、`~/.claude/settings.json` 及 **CCSwitch** 等第三方中转配置。
+- **DeepSeek Harness (`dsh`)**：采用官方 Mode A 无头执行与零侵入本地 Cordis 探针（`stream_probe.mjs`）；内置只读配置解析器，完整继承 `~/.dsh/profiles/desktop/cordis.patch.yml` 的 `contextWindow`、`input` 视觉能力、`reasoningEfforts` 映射及官方 `sandbox-policy: read-only` 沙箱，并在时间线清晰着色标注 `DSH 系统注入`。
+- **Claude Code (`claude`) & Codex CLI (`codex`)**：原生对接 `stream-json` 与 `exec --json` 协议，自动探测本机 `~/.claude/settings.json` 与 `~/.codex/config.toml` 当前生效模型，无缝兼容官方登录态与 **CCSwitch** 中转配置。
+- **直连 API（`direct`，零外部 CLI · 无第三方注入）**：内置零依赖 Node 22 SSE 无头工作器，支持 **OpenAI Chat Completions** / **OpenAI Responses** / **Anthropic Messages** 三协议，自带精简工作区工具环（`read_file` / `list_dir` / `grep_search` / `run_command` / `edit_file` / `write_file` 及按勾选按需开放的 `read_image` 识图工具）。
 
 ### 2. 进程级并发隔离与动态模型路由
 - 支持在 **模型与设置** 视图中一键指定全局默认模型，同时允许任意并发会话独立覆盖目标引擎、模型与推理强度（`Thinking Effort`）。
@@ -73,10 +74,11 @@ flowchart LR
     D2["drivers/dsh.mjs<br/>dsh --profile headless --json + stream_probe"]
     D3["drivers/claude.mjs<br/>claude -p --output-format stream-json"]
     D4["drivers/codex.mjs<br/>codex exec --json"]
+    D5["drivers/direct.mjs<br/>零注入直连 API SSE 工作器"]
 
     Coord -->|"start / wait / stop / list_models / open_pane"| MCP
-    MCP --> D1 & D2 & D3 & D4
-    D1 & D2 & D3 & D4 -->|"Normalized NDJSON Event Stream"| MCP
+    MCP --> D1 & D2 & D3 & D4 & D5
+    D1 & D2 & D3 & D4 & D5 -->|"Normalized NDJSON Event Stream"| MCP
     MCP <--> Store
     UI <-->|"alilas_poll_state (ETag) / dispatch / stop / profiles"| MCP
 ```

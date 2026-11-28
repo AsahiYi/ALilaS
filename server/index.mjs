@@ -261,8 +261,13 @@ function getDetectedDrivers(force = false) {
   if (!force && driversCache && now - driversCacheAt < 60_000) {
     return driversCache;
   }
-  const scanDesktop = profileStore.getSnapshot().settings?.scanDshDesktop !== false;
-  driversCache = detectAllDrivers({ pluginRoot: PLUGIN_ROOT, scanDesktop });
+  const snap = profileStore.getSnapshot();
+  const scanDesktop = snap.settings?.scanDshDesktop !== false;
+  driversCache = detectAllDrivers({
+    pluginRoot: PLUGIN_ROOT,
+    scanDesktop,
+    customProfiles: snap.customProfiles || [],
+  });
   driversCacheAt = now;
   driversVersion++;
   return driversCache;
@@ -274,7 +279,18 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
   const def = profSnap.defaultSelection;
 
   const chosenProfileId = profileId || (!driver && !model ? sessMeta?.profileId || def.profileId : "");
-  const profile = chosenProfileId ? profileStore.findProfile(chosenProfileId) : null;
+  let profile = chosenProfileId ? profileStore.findProfile(chosenProfileId) : null;
+  if (!profile && driver === "direct") {
+    profile =
+      (model
+        ? (profSnap.customProfiles || []).find(
+            (p) => (p.driver || "direct") === "direct" && (p.id === model || p.model === model),
+          )
+        : null) ||
+      (sessMeta?.profileId ? profileStore.findProfile(sessMeta.profileId) : null) ||
+      (profSnap.customProfiles || []).find((p) => (p.driver || "direct") === "direct") ||
+      null;
+  }
 
   let effectiveDriver =
     driver ||
@@ -285,11 +301,16 @@ function resolveEffectiveSelection({ driver, model, effort, profileId, sessionId
 
   const detected = getDetectedDrivers(false);
   if (!effectiveDriver || effectiveDriver === "auto") {
-    // Prefer dsh if configured with models, else agy, else first installed
+    // Prefer native CLI drivers (dsh with models -> agy -> claude -> codex), fall back to direct API
     const dshInfo = detected.find((d) => d.id === "dsh" && d.installed && d.models?.length > 0);
     const agyInfo = detected.find((d) => d.id === "agy" && d.installed);
-    const anyInstalled = detected.find((d) => d.installed);
-    effectiveDriver = dshInfo?.id || agyInfo?.id || anyInstalled?.id || "agy";
+    const anyNative = detected.find((d) => d.id !== "direct" && d.installed);
+    const directInfo = detected.find((d) => d.id === "direct" && d.models?.length > 0);
+    effectiveDriver = dshInfo?.id || agyInfo?.id || anyNative?.id || directInfo?.id || "agy";
+  }
+
+  if (effectiveDriver === "direct" && !profile) {
+    profile = (profSnap.customProfiles || []).find((p) => (p.driver || "direct") === "direct") || null;
   }
 
   let effectiveModel =
@@ -497,7 +518,7 @@ function launchSubagentRun({
   const sel = resolveEffectiveSelection({ driver, model, effort, profileId, sessionId });
   const driverMod = getDriver(sel.driver);
   if (!driverMod) {
-    throw new Error(`不支持的子代理驱动: ${sel.driver}（可选: agy | dsh | claude | codex）`);
+    throw new Error(`不支持的子代理驱动: ${sel.driver}（可选: agy | dsh | claude | codex | direct）`);
   }
 
   let workDir = (cwd || "").trim() || DEFAULT_CWD;
@@ -1176,13 +1197,19 @@ function loadSessionView(sessionId, maxItems = 180) {
   if (fp) {
     const parsed = parseDshSessionFile(fp, { maxItems });
     parsed.driver = meta.driver || "dsh";
-    parsed.model = meta.model || "";
-    parsed.effort = meta.effort || "";
+    parsed.model = meta.model || parsed.model || "";
+    parsed.effort = meta.effort || parsed.effort || "";
     const dshInfo = getDetectedDrivers(false).find((d) => d.id === "dsh");
     const matchedM = dshInfo?.models?.find(
       (m) => m.compositeId === parsed.model || m.id === parsed.model,
     );
-    parsed.contextWindow = matchedM?.contextWindow || inferContextWindow(parsed.model, 1_000_000);
+    parsed.contextWindow =
+      parsed.contextWindow ||
+      matchedM?.contextWindow ||
+      inferContextWindow(parsed.model, 1_000_000);
+    parsed.interrupted = Boolean(
+      parsed.interrupted && !isRunActive(run) && run?.status !== "stopped" && run?.status !== "done",
+    );
     parsed.lastTps = (run && run.tps > 0 ? run.tps : parsed.lastTps) || 0;
     parsed.lastStepDurationSec =
       (run && run.lastStepDurationSec > 0 ? run.lastStepDurationSec : parsed.lastStepDurationSec) || 0;
@@ -1641,7 +1668,7 @@ function buildStateSnapshot({
 
 const server = new McpServer({
   name: "alilas",
-  version: "3.2.4",
+  version: "3.3.0",
 });
 
 registerAppResource(
@@ -1728,13 +1755,13 @@ registerAppTool(
   {
     title: "派活给 ALilaS",
     description:
-      "以无头子代理模式异步启动 ALilaS 执行任务，支持 agy（Antigravity 原生模型）/ dsh（DeepSeek Harness & 自定义上游）/ claude / codex 四个引擎，每次运行独立传参零冲突，默认不限总时长并启用 180s 静默异常自动检测。",
+      "以无头子代理模式异步启动 ALilaS 执行任务，支持 agy（Antigravity 原生）/ dsh（DeepSeek Harness）/ claude / codex 以及独立无注入的 direct 直连 API 五大引擎，每次运行独立传参零冲突，默认不限总时长并启用 180s 静默异常自动检测。",
     inputSchema: {
       task: z.string().min(1).describe("任务说明书（背景、目标文件绝对路径、允许/禁止边界、验收标准）"),
       session_id: z.string().optional().describe("可选：复用已有会话 ID；新主题留空"),
       cwd: z.string().optional().describe("新建会话时的工作目录（务必传当前项目目录）"),
       driver: z
-        .enum(["auto", "agy", "dsh", "claude", "codex"])
+        .enum(["auto", "agy", "dsh", "claude", "codex", "direct"])
         .optional()
         .describe("可选：指定底层驱动（默认按用户配置的默认子代理模型自动选择）"),
       model: z.string().optional().describe("可选：本次运行指定的模型 ID（与并发其他会话零冲突）"),
@@ -1941,7 +1968,7 @@ server.registerTool(
   "alilas_list_models",
   {
     title: "列出可用子代理引擎与模型",
-    description: "查看当前机器已安装的引擎（agy / dsh / claude / codex）、原生及自定义模型列表与当前默认配置。",
+    description: "查看当前机器已安装的引擎（agy / dsh / claude / codex / direct）、原生及直连 API 模型列表与当前默认配置。",
     inputSchema: {
       refresh: z.boolean().optional().describe("设为 true 强制重新探测 CLI 与模型目录"),
     },
@@ -1965,9 +1992,10 @@ server.registerTool(
       }
     }
     if (prof.customProfiles.length) {
-      lines.push("\n### 自定义上游预设");
+      lines.push("\n### 直连 API 模型预设");
       for (const p of prof.customProfiles) {
-        lines.push(`  - ${p.id}: ${p.name} [${p.driver}/${p.model}] (baseURL: ${p.baseURL || "默认"}, keyEnv: ${p.apiKeyEnv || "默认"})`);
+        const cap = Array.isArray(p.inputs) && p.inputs.includes("image") ? "text+image" : "text";
+        lines.push(`  - ${p.id}: ${p.name} [${p.driver || "direct"}/${p.api || "openai-completions"}/${p.model}] (${cap}, baseURL: ${p.baseURL || "默认"}, keyEnv: ${p.apiKeyEnv || "无"})`);
       }
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -2061,7 +2089,7 @@ registerAppTool(
       task: z.string().min(1),
       session_id: z.string().optional(),
       cwd: z.string().optional(),
-      driver: z.enum(["auto", "agy", "dsh", "claude", "codex"]).optional(),
+      driver: z.enum(["auto", "agy", "dsh", "claude", "codex", "direct"]).optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profile_id: z.string().optional(),
@@ -2137,7 +2165,11 @@ registerAppTool(
   async ({ session_id, action, alias }) => {
     if (!registry.sessions[session_id]) {
       registry.sessions[session_id] = {
-        driver: session_id.startsWith("session-") ? "dsh" : "agy",
+        driver: session_id.startsWith("session-")
+          ? "dsh"
+          : session_id.startsWith("direct-")
+            ? "direct"
+            : "agy",
         model: "",
         effort: "",
         profileId: "",
@@ -2185,14 +2217,15 @@ registerAppTool(
         .object({
           id: z.string().optional(),
           name: z.string(),
-          driver: z.enum(["dsh", "claude", "codex", "agy"]),
+          driver: z.enum(["direct", "dsh", "claude", "codex", "agy"]).optional(),
           provider: z.string().optional(),
           baseURL: z.string().optional(),
           apiKeyEnv: z.string().optional(),
-          api: z.string().optional(),
+          api: z.enum(["openai-completions", "openai-responses", "anthropic-messages"]).optional(),
           model: z.string(),
           contextWindow: z.number().int().positive().optional(),
           maxTokens: z.number().int().positive().optional(),
+          inputs: z.array(z.enum(["text", "image"])).optional(),
           effort: z.string().optional(),
         })
         .optional(),
@@ -2209,8 +2242,10 @@ registerAppTool(
       });
     } else if (args.action === "upsert_profile" && args.profile) {
       profileStore.upsertCustomProfile(args.profile);
+      getDetectedDrivers(true);
     } else if (args.action === "delete_profile" && args.profile_id) {
       profileStore.deleteCustomProfile(args.profile_id);
+      getDetectedDrivers(true);
     } else if (args.action === "update_settings" && args.settings) {
       profileStore.updateSettings(args.settings);
       getDetectedDrivers(true);

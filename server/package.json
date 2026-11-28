@@ -1,9 +1,9 @@
 {
   "name": "alilas-mcp-server",
-  "version": "3.2.4",
+  "version": "3.3.0",
   "private": true,
   "type": "module",
-  "description": "Multi-engine better-subagent MCP App server for Antigravity (AGY / DSH / Claude Code / Codex CLI)",
+  "description": "Multi-engine better-subagent MCP App server for Antigravity (AGY / DSH / Claude Code / Codex CLI / Direct API)",
   "scripts": {
     "build:ui": "node ../ui/build.mjs",
     "test": "node --test ../tests/drivers.test.mjs",

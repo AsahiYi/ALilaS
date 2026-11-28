@@ -148,21 +148,28 @@ export function createProfileStore(dataDir) {
   function upsertCustomProfile(profile) {
     const id =
       (profile.id || "").trim() ||
-      `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      `direct-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const validApis = ["openai-completions", "openai-responses", "anthropic-messages"];
+    const api = validApis.includes(profile.api) ? profile.api : "openai-completions";
+    const inputs = Array.isArray(profile.inputs)
+      ? Array.from(new Set(profile.inputs.filter((x) => x === "text" || x === "image")))
+      : ["text", "image"];
+    if (!inputs.includes("text")) inputs.unshift("text");
     const clean = {
       id,
       name: String(profile.name || profile.model || id).trim().slice(0, 60),
-      driver: ["dsh", "claude", "codex", "agy"].includes(profile.driver)
+      driver: ["direct", "dsh", "claude", "codex", "agy"].includes(profile.driver)
         ? profile.driver
-        : "dsh",
-      provider: String(profile.provider || "custom").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "custom",
+        : "direct",
+      provider: String(profile.provider || "direct").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "direct",
       baseURL: String(profile.baseURL || "").trim(),
       // Strictly store env variable NAME, never raw secret keys
       apiKeyEnv: String(profile.apiKeyEnv || "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 64),
-      api: String(profile.api || "openai-responses").trim(),
+      api,
       model: String(profile.model || "").trim(),
       contextWindow: Number(profile.contextWindow) || inferContextWindow(profile.model, 200_000),
       maxTokens: Number(profile.maxTokens) || 64_000,
+      inputs,
       effort: String(profile.effort || "high").trim(),
     };
     const idx = data.customProfiles.findIndex((p) => p.id === id);

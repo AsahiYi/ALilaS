@@ -80,6 +80,8 @@ export function parseProvidersFromYaml(text) {
   let curModel = null;
   let inEfforts = false;
   let effortsIndent = -1;
+  let inInputs = false;
+  let inputsIndent = -1;
 
   for (const rawLine of lines) {
     const clean = stripInlineComment(rawLine).replace(/\s+$/, "");
@@ -95,6 +97,7 @@ export function parseProvidersFromYaml(text) {
       inModels = false;
       curModel = null;
       inEfforts = false;
+      inInputs = false;
       continue;
     }
 
@@ -114,6 +117,7 @@ export function parseProvidersFromYaml(text) {
       inModels = false;
       curModel = null;
       inEfforts = false;
+      inInputs = false;
       continue;
     }
 
@@ -134,6 +138,7 @@ export function parseProvidersFromYaml(text) {
         inModels = false;
         curModel = null;
         inEfforts = false;
+        inInputs = false;
         continue;
       }
     }
@@ -143,6 +148,9 @@ export function parseProvidersFromYaml(text) {
     // Inside a provider
     if (inEfforts && indent <= effortsIndent) {
       inEfforts = false;
+    }
+    if (inInputs && indent <= inputsIndent) {
+      inInputs = false;
     }
     if (inModels && indent <= modelsIndent) {
       inModels = false;
@@ -165,9 +173,22 @@ export function parseProvidersFromYaml(text) {
       continue;
     }
 
+    // Inside `input:` list under a model (`- text` / `- image`)
+    if (inInputs && curModel) {
+      const im = trimmed.match(/^-\s+(.+)$/);
+      if (im) {
+        const val = unquoteYaml(im[1]).toLowerCase();
+        if (val && !curModel._parsedInputs.includes(val)) {
+          curModel._parsedInputs.push(val);
+        }
+      }
+      continue;
+    }
+
     // Inside `models:`
     if (trimmed.startsWith("- ")) {
       inEfforts = false;
+      inInputs = false;
       const m = trimmed.match(/^-\s+id:\s*(.+)$/);
       if (m) {
         const modelId = unquoteYaml(m[1]);
@@ -178,7 +199,9 @@ export function parseProvidersFromYaml(text) {
           providerLabel: curProv.displayName || curProv.key,
           contextWindow: inferContextWindow(modelId, 200_000),
           maxTokens: 64_000,
+          inputs: ["text", "image"],
           efforts: ["low", "medium", "high"],
+          effortMap: null,
         };
         curProv.models.push(curModel);
       }
@@ -188,11 +211,19 @@ export function parseProvidersFromYaml(text) {
     if (!curModel) continue;
 
     if (inEfforts) {
-      const ekv = trimmed.match(/^(off|low|medium|high|xhigh):\s*(.*)$/i);
+      const ekv = trimmed.match(/^(off|low|medium|high|xhigh|max):\s*(.*)$/i);
       if (ekv) {
         const ek = ekv[1].toLowerCase();
-        const ev = ekv[2].trim().toLowerCase();
-        if (ek !== "off" && ev !== "null" && !curModel._parsedEfforts.includes(ek)) {
+        const rawEv = ekv[2].trim();
+        const lowerEv = rawEv.toLowerCase();
+        if (!curModel._parsedEffortMap) curModel._parsedEffortMap = {};
+        curModel._parsedEffortMap[ek] =
+          lowerEv === "null" || lowerEv === "~" || rawEv === ""
+            ? null
+            : rawEv === "{}"
+              ? ek
+              : unquoteYaml(rawEv);
+        if (ek !== "off" && lowerEv !== "null" && !curModel._parsedEfforts.includes(ek)) {
           curModel._parsedEfforts.push(ek);
         }
       }
@@ -205,10 +236,23 @@ export function parseProvidersFromYaml(text) {
       if (k === "name" && v) curModel.name = unquoteYaml(v);
       else if (k === "contextWindow" && v) curModel.contextWindow = Number(v) || curModel.contextWindow;
       else if (k === "maxTokens" && v) curModel.maxTokens = Number(v) || curModel.maxTokens;
-      else if (k === "reasoningEfforts") {
+      else if (k === "input") {
+        const inlineArr = v.match(/^\[(.*)\]$/);
+        if (inlineArr) {
+          curModel._parsedInputs = inlineArr[1]
+            .split(",")
+            .map((s) => unquoteYaml(s).toLowerCase())
+            .filter(Boolean);
+        } else {
+          inInputs = true;
+          inputsIndent = indent;
+          curModel._parsedInputs = [];
+        }
+      } else if (k === "reasoningEfforts") {
         inEfforts = true;
         effortsIndent = indent;
         curModel._parsedEfforts = [];
+        curModel._parsedEffortMap = {};
       }
     }
   }
@@ -219,7 +263,15 @@ export function parseProvidersFromYaml(text) {
       if (Array.isArray(m._parsedEfforts) && m._parsedEfforts.length > 0) {
         m.efforts = m._parsedEfforts;
       }
+      if (m._parsedEffortMap && Object.keys(m._parsedEffortMap).length > 0) {
+        m.effortMap = m._parsedEffortMap;
+      }
+      if (Array.isArray(m._parsedInputs) && m._parsedInputs.length > 0) {
+        m.inputs = m._parsedInputs;
+      }
       delete m._parsedEfforts;
+      delete m._parsedEffortMap;
+      delete m._parsedInputs;
     }
   }
   return providers.filter((p) => p.models.length > 0);
@@ -349,6 +401,8 @@ function resolveDiscoveredModel({ pluginRoot, model, provider }) {
         model: found.id,
         contextWindow: found.contextWindow || 200_000,
         maxTokens: found.maxTokens || 64_000,
+        inputs: Array.isArray(found.inputs) && found.inputs.length ? found.inputs : ["text", "image"],
+        effortMap: found.effortMap || null,
       };
     }
   }
@@ -359,15 +413,25 @@ function resolveDiscoveredModel({ pluginRoot, model, provider }) {
  * Per-run temporary YAML patch overlay so concurrent sessions can freely run different models
  * or any discovered DSH desktop upstream with ZERO conflict on shared config files.
  */
-function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, profile }) {
+function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, profile, permissionMode }) {
   const resolved = profile?.baseURL
     ? profile
     : resolveDiscoveredModel({ pluginRoot, model, provider: profile?.provider });
 
-  if (!model && !effort && !resolved) return "";
+  const isReadonly = permissionMode === "readonly";
+  if (!model && !effort && !resolved && !isReadonly) return "";
   const entries = [];
 
   if (resolved?.baseURL && resolved?.provider && resolved?.model) {
+    const inputs =
+      Array.isArray(resolved.inputs) && resolved.inputs.length ? resolved.inputs : ["text", "image"];
+    const effortMap =
+      resolved.effortMap && Object.keys(resolved.effortMap).length
+        ? resolved.effortMap
+        : { off: null, low: "low", medium: "medium", high: "high" };
+    const effortLines = Object.entries(effortMap).map(([k, v]) =>
+      v === null ? `              ${k}: null` : `              ${k}: ${JSON.stringify(v)}`,
+    );
     entries.push(
       `- id: credentials\n  disabled: false`,
       `- id: tool-result-pruner\n  disabled: true`,
@@ -387,13 +451,9 @@ function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, prof
         `            contextWindow: ${Number(resolved.contextWindow) || 200_000}`,
         `            maxTokens: ${Number(resolved.maxTokens) || 64_000}`,
         `            input:`,
-        `              - text`,
-        `              - image`,
+        ...inputs.map((inp) => `              - ${inp}`),
         `            reasoningEfforts:`,
-        `              off: null`,
-        `              low: low`,
-        `              medium: medium`,
-        `              high: high`,
+        ...effortLines,
       ].join("\n"),
     );
   }
@@ -410,10 +470,27 @@ function writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, prof
     ];
     if (targetProvider) cfgLines.push(`    provider: ${JSON.stringify(targetProvider)}`);
     if (targetModel) cfgLines.push(`    model: ${JSON.stringify(targetModel)}`);
-    if (targetEffort && ["off", "low", "medium", "high"].includes(targetEffort)) {
+    if (targetEffort && ["off", "low", "medium", "high", "xhigh", "max"].includes(targetEffort)) {
       cfgLines.push(`    reasoningEffort: ${targetEffort === "off" ? "null" : targetEffort}`);
     }
     entries.push(cfgLines.join("\n"));
+  }
+
+  if (isReadonly) {
+    entries.push(
+      [
+        `- id: sandbox-policy`,
+        `  name: "@deepseek-ai/dsh-sandbox-policy"`,
+        `  config:`,
+        `    mode: "read-only"`,
+      ].join("\n"),
+      [
+        `- id: approval`,
+        `  name: "@deepseek-ai/dsh-user-approval"`,
+        `  config:`,
+        `    policy: "never"`,
+      ].join("\n"),
+    );
   }
 
   if (entries.length === 0) return "";
@@ -431,6 +508,7 @@ export function buildInvocation({
   cwd,
   model,
   effort,
+  permissionMode = "auto",
   profile,
   dataDir,
   pluginRoot,
@@ -446,7 +524,15 @@ export function buildInvocation({
   const basePatch = resolveBasePatch(pluginRoot);
   if (basePatch) args.push("--patch", basePatch);
 
-  const perRunPatch = writePerRunModelPatch({ dataDir, pluginRoot, runId, model, effort, profile });
+  const perRunPatch = writePerRunModelPatch({
+    dataDir,
+    pluginRoot,
+    runId,
+    model,
+    effort,
+    profile,
+    permissionMode,
+  });
   if (perRunPatch) {
     args.push("--patch", perRunPatch);
     cleanupPaths.push(perRunPatch);
@@ -461,11 +547,16 @@ export function buildInvocation({
   }
   args.push("-");
 
+  const env = { ...process.env, PYTHONIOENCODING: "utf-8" };
+  if (permissionMode === "readonly") {
+    env.DSH_PERMISSION_MODE = "read-only";
+  }
+
   return {
     cmd: spec.cmd,
     args,
     cwd,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+    env,
     stdinText: task,
     shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(spec.cmd),
     cleanupPaths,

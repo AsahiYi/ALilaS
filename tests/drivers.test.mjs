@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +9,7 @@ import test from "node:test";
 import * as agy from "../server/drivers/agy.mjs";
 import * as claude from "../server/drivers/claude.mjs";
 import * as codex from "../server/drivers/codex.mjs";
+import * as direct from "../server/drivers/direct.mjs";
 import * as dsh from "../server/drivers/dsh.mjs";
 import { createProfileStore } from "../server/profiles.mjs";
 import { createTimelineStore } from "../server/timeline_store.mjs";
@@ -302,6 +305,295 @@ test("dsh_reader preserves full first prompt line instead of DSH truncated fallb
     const parsed = parseSessionFile(fp, { maxItems: 20 });
     assert.equal(parsed.title, fullFirstLine);
   } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("dsh parseProvidersFromYaml preserves input capabilities & custom reasoningEfforts map", () => {
+  const sampleYaml = `
+- id: llm-pi-ai
+  config:
+    providers:
+      custom-up:
+        displayName: "Custom Upstream"
+        apiKeyEnv: CUSTOM_UP_KEY
+        api: openai-responses
+        baseURL: https://up.example.com/v1
+        models:
+          - id: text-only-model
+            name: TextOnly
+            contextWindow: 128000
+            maxTokens: 16384
+            input:
+              - text
+            reasoningEfforts:
+              off: null
+              low: minimal
+              medium: medium
+              high: xhigh
+          - id: vision-model
+            name: VisionOne
+            contextWindow: 1000000
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              high: high
+`;
+  const providers = dsh.parseProvidersFromYaml(sampleYaml);
+  assert.equal(providers.length, 1);
+  const [m1, m2] = providers[0].models;
+  assert.deepEqual(m1.inputs, ["text"]);
+  assert.deepEqual(m1.effortMap, { off: null, low: "minimal", medium: "medium", high: "xhigh" });
+  assert.deepEqual(m1.efforts, ["low", "medium", "high"]);
+  assert.deepEqual(m2.inputs, ["text", "image"]);
+  assert.equal(m2.contextWindow, 1000000);
+});
+
+test("dsh buildInvocation generates readonly sandbox-policy patch and env in readonly mode", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alilas-dsh-ro-"));
+  const prevBin = process.env.ALILAS_DSH_BIN;
+  try {
+    process.env.ALILAS_DSH_BIN = path.join(tmp, "fake-dsh.mjs");
+    const inv = dsh.buildInvocation({
+      runId: "run-ro-1",
+      task: "Audit only",
+      cwd: tmp,
+      permissionMode: "readonly",
+      dataDir: tmp,
+      pluginRoot: tmp,
+    });
+    assert.equal(inv.env.DSH_PERMISSION_MODE, "read-only");
+    assert.equal(inv.cleanupPaths.length, 1);
+    const patchText = fs.readFileSync(inv.cleanupPaths[0], "utf8");
+    assert.match(patchText, /id:\s*sandbox-policy/);
+    assert.match(patchText, /mode:\s*"read-only"/);
+    assert.match(patchText, /id:\s*approval/);
+    assert.match(patchText, /policy:\s*"never"/);
+  } finally {
+    if (prevBin === undefined) delete process.env.ALILAS_DSH_BIN;
+    else process.env.ALILAS_DSH_BIN = prevBin;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("codex buildInvocation uses -c sandbox_mode=read-only for both fresh and resume readonly runs", () => {
+  if (!codex.resolveCommand()) return;
+  const fresh = codex.buildInvocation({
+    task: "Inspect",
+    cwd: os.tmpdir(),
+    permissionMode: "readonly",
+  });
+  assert.ok(fresh.args.includes("sandbox_mode=read-only"));
+  const resumed = codex.buildInvocation({
+    task: "Continue",
+    sessionId: "th-abc",
+    cwd: os.tmpdir(),
+    permissionMode: "readonly",
+  });
+  assert.ok(resumed.args.includes("resume"));
+  assert.ok(resumed.args.includes("sandbox_mode=read-only"));
+});
+
+test("dsh_reader extracts request/context model & window, classifies system-reminder, and detects interrupted runs", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alilas-dsh-sys-"));
+  try {
+    const fp = path.join(tmp, "session.v4.jsonl.zstd");
+    const now = Date.now();
+    const lines = [
+      JSON.stringify({ type: "session", id: "session-sys-1", cwd: tmp, createdAt: now }),
+      JSON.stringify({
+        type: "request/context",
+        seq: 2,
+        time: now + 10,
+        data: { provider: "myprov", model: "my-128k-model", contextWindow: 128000 },
+      }),
+      JSON.stringify({
+        type: "request/header",
+        seq: 3,
+        time: now + 15,
+        data: { header: { config: { provider: "myprov", model: "my-128k-model", reasoningEffort: "medium" } } },
+      }),
+      JSON.stringify({
+        type: "user/message",
+        seq: 4,
+        time: now + 20,
+        data: { content: [{ type: "text", text: "<system-reminder>\nAvailable skills list...\n</system-reminder>" }] },
+      }),
+      JSON.stringify({
+        type: "user/message",
+        seq: 5,
+        time: now + 30,
+        data: { content: [{ type: "text", text: "Real user task title here" }] },
+      }),
+      JSON.stringify({ type: "step/start", seq: 6, time: now + 40, data: { step: 1 } }),
+    ].join("\n") + "\n";
+
+    fs.writeFileSync(fp, zlib.zstdCompressSync(Buffer.from(lines, "utf8")));
+    const parsed = parseSessionFile(fp, { maxItems: 50 });
+    assert.equal(parsed.model, "myprov/my-128k-model");
+    assert.equal(parsed.effort, "medium");
+    assert.equal(parsed.contextWindow, 128000);
+    assert.equal(parsed.title, "Real user task title here");
+    assert.equal(parsed.interrupted, true);
+    const sysItem = parsed.items.find((it) => it.kind === "system");
+    assert.ok(sysItem, "expected system-reminder item to be preserved as kind='system'");
+    assert.match(sysItem.label, /DSH 系统注入/);
+
+    // Now append turn/end as a new zstd frame (matching real DSH incremental frame appends)
+    const endFrame = JSON.stringify({ type: "turn/end", seq: 7, time: now + 50, data: {} }) + "\n";
+    fs.appendFileSync(fp, zlib.zstdCompressSync(Buffer.from(endFrame, "utf8")));
+    const parsedDone = parseSessionFile(fp, { maxItems: 50 });
+    assert.equal(parsedDone.interrupted, false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("direct engine executes zero-injection SSE tool loop, respects readonly & vision gating, and persists history", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alilas-direct-e2e-"));
+  const sampleFile = path.join(tmp, "hello.txt");
+  fs.writeFileSync(sampleFile, "DIRECT_OK_42\n", "utf8");
+
+  const capturedRequests = [];
+  let reqCount = 0;
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      capturedRequests.push(body);
+      reqCount++;
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      if (reqCount === 1) {
+        // Step 1: stream reasoning + request read_file tool call
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [{ delta: { reasoning_content: "Let me read hello.txt." } }],
+          })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_read_1",
+                      type: "function",
+                      function: { name: "read_file", arguments: JSON.stringify({ path: "hello.txt" }) },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [],
+            usage: { prompt_tokens: 120, completion_tokens: 25, total_tokens: 145 },
+          })}\n\n`,
+        );
+        res.write("data: [DONE]\n\n");
+        res.end();
+      } else {
+        // Step 2: confirm tool result reached history and reply with final text
+        const toolMsg = body.messages.find((m) => m.role === "tool");
+        const reply = toolMsg?.content?.includes("DIRECT_OK_42")
+          ? "Verified: DIRECT_OK_42"
+          : "Missing tool output";
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [{ delta: { content: reply } }],
+          })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [],
+            usage: { prompt_tokens: 210, completion_tokens: 12, total_tokens: 222 },
+          })}\n\n`,
+        );
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  try {
+    const profile = {
+      id: "prof-direct-test",
+      name: "Mock Direct",
+      driver: "direct",
+      api: "openai-completions",
+      baseURL: `http://127.0.0.1:${port}/v1`,
+      apiKeyEnv: "",
+      model: "mock-model-1",
+      contextWindow: 128000,
+      maxTokens: 4096,
+      inputs: ["text"],
+      effort: "medium",
+    };
+
+    const inv = direct.buildInvocation({
+      task: "Read hello.txt and report its content.",
+      cwd: tmp,
+      model: profile.model,
+      effort: "medium",
+      permissionMode: "readonly",
+      profile,
+      dataDir: tmp,
+    });
+
+    const events = [];
+    const parser = direct.createParser((e) => events.push(e));
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(inv.cmd, inv.args, {
+        cwd: inv.cwd,
+        env: inv.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.write(inv.stdinText, "utf8");
+      child.stdin.end();
+      let buf = "";
+      child.stdout.on("data", (d) => {
+        buf += d.toString("utf8");
+        let idx;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (line) parser.onStdoutLine(line);
+        }
+      });
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(capturedRequests.length, 2);
+
+    // Readonly + text-only gating check
+    const toolNames = capturedRequests[0].tools.map((t) => t.function.name);
+    assert.ok(toolNames.includes("read_file"));
+    assert.equal(toolNames.includes("write_file"), false, "readonly must hide write_file");
+    assert.equal(toolNames.includes("edit_file"), false, "readonly must hide edit_file");
+    assert.equal(toolNames.includes("read_image"), false, "text-only profile must hide read_image");
+
+    assert.equal(events.find((e) => e.type === "reasoning_commit")?.text, "Let me read hello.txt.");
+    assert.equal(events.find((e) => e.type === "tool_start")?.toolName, "read_file");
+    assert.match(events.find((e) => e.type === "tool_end")?.resultText || "", /DIRECT_OK_42/);
+    assert.equal(events.find((e) => e.type === "final")?.text, "Verified: DIRECT_OK_42");
+
+    const sid = events.find((e) => e.type === "session")?.sessionId;
+    assert.ok(sid?.startsWith("direct-"));
+    const histPath = path.join(tmp, "direct_sessions", `${sid}.json`);
+    assert.ok(fs.existsSync(histPath), "direct session history must be persisted");
+  } finally {
+    server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

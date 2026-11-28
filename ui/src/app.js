@@ -6,7 +6,13 @@ import {
 import { z } from "zod";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 
-const app = new App({ name: "alilas", version: "3.2.4" }, {});
+const app = new App({ name: "alilas", version: "3.3.0" }, {});
+
+const API_LABELS = {
+  "openai-completions": "OpenAI Chat",
+  "openai-responses": "OpenAI Responses",
+  "anthropic-messages": "Anthropic Messages",
+};
 
 const EFFORT_LABELS = {
   off: "关",
@@ -74,6 +80,7 @@ const state = {
   expandedProvidersSeeded: false,
   expandedModelRow: "",
   openSettingsFolds: new Set(),
+  editingProfileId: "",
   // Timeline incremental rendering
   openDetails: new Set(),
   closedDetails: new Set(),
@@ -144,7 +151,7 @@ function shortProjectName(cwd, slug) {
 }
 
 function shortDriverTag(driver) {
-  const map = { agy: "AGY", dsh: "DSH", claude: "Claude", codex: "Codex" };
+  const map = { agy: "AGY", dsh: "DSH", claude: "Claude", codex: "Codex", direct: "Direct" };
   return map[driver] || driver || "AGY";
 }
 
@@ -294,7 +301,7 @@ function getSelectionDisplay(sel = state.selection) {
       return {
         name: p.name || p.model,
         effort: effortLabel(sel.effort || p.effort),
-        driver: p.driver,
+        driver: p.driver || "direct",
       };
     }
   }
@@ -350,7 +357,12 @@ function syncInitialSelection() {
 
   if (def.profileId && state.customProfiles.some((p) => p.id === def.profileId)) {
     const p = state.customProfiles.find((x) => x.id === def.profileId);
-    next = { driver: p.driver, model: p.model, effort: def.effort || p.effort || "high", profileId: p.id };
+    next = {
+      driver: p.driver || "direct",
+      model: p.model,
+      effort: def.effort || p.effort || "high",
+      profileId: p.id,
+    };
   } else if (def.driver) {
     const dInfo = getDriverInfo(def.driver);
     if (dInfo?.installed) {
@@ -409,7 +421,9 @@ function syncInitialSelection() {
 
 function isDefaultMatch(driver, model, effort, profileId = "") {
   const def = state.defaultSelection || {};
-  if (profileId) return def.profileId === profileId;
+  if (profileId) {
+    return def.profileId === profileId && (def.effort || "high") === (effort || "high");
+  }
   if (def.profileId) return false;
   if (def.driver !== driver) return false;
   if (def.model !== model) return false;
@@ -457,6 +471,10 @@ function renderStatus() {
   } else if (run?.status === "done") {
     dot.className = "dot done";
     label.textContent = `完成 · ${run.elapsedSec}s`;
+    stopBtn.style.display = "none";
+  } else if (state.session?.interrupted) {
+    dot.className = "dot stalled";
+    label.textContent = "上次意外中断";
     stopBtn.style.display = "none";
   } else if (state.session) {
     dot.className = "dot idle";
@@ -851,6 +869,13 @@ function buildSettingsModelListHtml() {
                   </div>`
                 : "";
 
+              const hasVision = Array.isArray(m.inputs) && m.inputs.includes("image");
+              const capBadge = Array.isArray(m.inputs)
+                ? hasVision
+                  ? `<span class="pop-badge vision">视觉</span>`
+                  : `<span class="pop-badge">纯文本</span>`
+                : "";
+
               return `<div class="pop-row-wrap">
                 <button type="button" class="pop-row ${isSel ? "selected" : ""}" data-toggle-row="${escapeHtml(
                   rowKey,
@@ -859,6 +884,7 @@ function buildSettingsModelListHtml() {
                 )}" data-pick-effort="${escapeHtml(curEffort)}">
                   <span class="pop-row-left">
                     <span class="pop-row-name">${escapeHtml(m.name || m.id)}</span>
+                    ${capBadge}
                     <span class="pop-row-sub">${isSel ? effortLabel(curEffort) + " · " : ""}${formatTokens(
                       m.contextWindow || 200000,
                     )}</span>
@@ -959,33 +985,68 @@ function buildSettingsModelListHtml() {
     );
   }
 
-  // Custom profiles tab
+  // Direct API (zero-CLI, zero third-party injection) tab
   const list = state.customProfiles.filter(
     (p) =>
-      !q || (p.name || "").toLowerCase().includes(q) || (p.model || "").toLowerCase().includes(q),
+      !q ||
+      (p.name || "").toLowerCase().includes(q) ||
+      (p.model || "").toLowerCase().includes(q) ||
+      (p.api || "").toLowerCase().includes(q),
   );
   if (!list.length) {
-    return `<div class="pop-empty">暂无自定义上游预设，可在下方「自定义上游预设」折叠栏新增。</div>`;
+    return `<div class="pop-empty">暂无直连 API 模型。可在下方「直连 API 模型」折叠栏填写 Base URL、协议与 Key 环境变量名添加（无需安装外部 CLI，无第三方系统注入）。</div>`;
   }
+  const directEfforts = ["off", "low", "medium", "high"];
   return list
     .map((p) => {
+      const rowKey = `direct::${p.id}`;
       const isSel = state.selection.profileId === p.id;
-      const isDef = isDefaultMatch(p.driver, p.model, p.effort, p.id);
-      return `<div class="pop-row-wrap">
-        <div class="pop-row ${isSel ? "selected" : ""}" style="cursor:default;">
-          <button type="button" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;flex:1;min-width:0;" data-pick-profile="${escapeHtml(
-            p.id,
-          )}">
-            <span class="pop-row-name">${escapeHtml(p.name)}</span>
-            <span class="pop-row-sub">[${shortDriverTag(p.driver)}/${escapeHtml(p.model)}]</span>
-          </button>
-          <span class="pop-row-right">
-            ${isSel ? '<span class="pop-check">✓</span>' : ""}
+      const curEffort = isSel ? state.selection.effort || p.effort || "high" : p.effort || "high";
+      const isExpanded = state.expandedModelRow === rowKey;
+      const isDef = isDefaultMatch(p.driver || "direct", p.model, curEffort, p.id);
+      const hasVision = Array.isArray(p.inputs) && p.inputs.includes("image");
+      const apiShort = API_LABELS[p.api || "openai-completions"] || p.api || "OpenAI Chat";
+      const capBadge = hasVision
+        ? `<span class="pop-badge vision">视觉</span>`
+        : `<span class="pop-badge">纯文本</span>`;
+
+      const trayHtml = isExpanded
+        ? `<div class="effort-tray">
+            <div class="effort-chips">
+              ${directEfforts
+                .map(
+                  (ef) =>
+                    `<button type="button" class="effort-chip ${
+                      isSel && curEffort === ef ? "active" : ""
+                    }" data-pick-profile="${escapeHtml(p.id)}" data-pick-effort="${escapeHtml(
+                      ef,
+                    )}" data-apply-toast="1">${escapeHtml(effortLabel(ef))}</button>`,
+                )
+                .join("")}
+            </div>
             <button type="button" class="default-pin-btn ${isDef ? "is-def" : ""}" data-pin-profile="${escapeHtml(
               p.id,
-            )}">${isDef ? "★ 已默认" : "设为默认"}</button>
+            )}" data-pin-effort="${escapeHtml(curEffort)}">${isDef ? "★ 已默认" : "★ 设为默认"}</button>
+          </div>`
+        : "";
+
+      return `<div class="pop-row-wrap">
+        <button type="button" class="pop-row ${isSel ? "selected" : ""}" data-toggle-row="${escapeHtml(
+          rowKey,
+        )}" data-pick-profile="${escapeHtml(p.id)}" data-pick-effort="${escapeHtml(curEffort)}">
+          <span class="pop-row-left">
+            <span class="pop-row-name">${escapeHtml(p.name || p.model)}</span>
+            ${capBadge}
+            <span class="pop-row-sub">${escapeHtml(apiShort)} · ${formatTokens(
+              p.contextWindow || 200000,
+            )}</span>
           </span>
-        </div>
+          <span class="pop-row-right">
+            ${isSel ? '<span class="pop-check">✓</span>' : ""}
+            <span>${isExpanded ? "▾" : "▸"}</span>
+          </span>
+        </button>
+        ${trayHtml}
       </div>`;
     })
     .join("");
@@ -1273,7 +1334,7 @@ function renderSettingsView() {
     { id: "agy", label: "AGY", info: getDriverInfo("agy") },
     { id: "claude", label: "Claude", info: getDriverInfo("claude") },
     { id: "codex", label: "Codex", info: getDriverInfo("codex") },
-    { id: "custom", label: "自定义", info: { installed: state.customProfiles.length > 0 } },
+    { id: "direct", label: "直连 API", info: { installed: state.customProfiles.length > 0 } },
   ];
 
   const enginePillsHtml = tabDefs
@@ -1301,21 +1362,38 @@ function renderSettingsView() {
     )
     .join("");
 
+  const editing = state.editingProfileId
+    ? state.customProfiles.find((x) => x.id === state.editingProfileId) || null
+    : null;
+  const editApi = editing?.api || "openai-completions";
+  const editEffort = editing?.effort || "high";
+  const editImageChecked = editing ? Array.isArray(editing.inputs) && editing.inputs.includes("image") : false;
+
   const customListHtml = state.customProfiles.length
     ? state.customProfiles
-        .map(
-          (p) => `<div class="call-row">
+        .map((p) => {
+          const apiShort = API_LABELS[p.api || "openai-completions"] || p.api || "OpenAI Chat";
+          const cap = Array.isArray(p.inputs) && p.inputs.includes("image") ? "视觉" : "纯文本";
+          const isEditingThis = editing?.id === p.id;
+          return `<div class="call-row">
             <div class="call-left">
-              <div class="call-top">${escapeHtml(p.name)}</div>
-              <div class="call-sub">[${shortDriverTag(p.driver)}] ${escapeHtml(p.model)}${
-                p.apiKeyEnv ? ` · $${escapeHtml(p.apiKeyEnv)}` : ""
-              }</div>
+              <div class="call-top">
+                <span>${escapeHtml(p.name || p.model)}</span>
+                <span class="pop-badge ${cap === "视觉" ? "vision" : ""}">${cap}</span>
+                ${isEditingThis ? `<span class="pop-badge plugin">编辑中</span>` : ""}
+              </div>
+              <div class="call-sub">${escapeHtml(apiShort)} · ${escapeHtml(p.model)} · ${formatTokens(
+                p.contextWindow || 200000,
+              )}${p.apiKeyEnv ? ` · $${escapeHtml(p.apiKeyEnv)}` : ""}</div>
             </div>
-            <button type="button" class="btn btn-danger" data-del-profile="${escapeHtml(p.id)}">删除</button>
-          </div>`,
-        )
+            <div class="row-actions">
+              <button type="button" class="btn" data-edit-profile="${escapeHtml(p.id)}">编辑</button>
+              <button type="button" class="btn btn-danger" data-del-profile="${escapeHtml(p.id)}">删除</button>
+            </div>
+          </div>`;
+        })
         .join("")
-    : `<div class="muted" style="font-size:11px;">暂无自定义上游预设（仅存环境变量名，绝不存明文 API Key）</div>`;
+    : `<div class="muted" style="font-size:11px;">暂无直连 API 模型（无需安装 CLI、无第三方系统提示注入；仅存环境变量名，绝不存明文 Key）</div>`;
 
   const readyCount = state.drivers.filter((d) => d.installed).length;
   const isFoldOpen = (k) => (state.openSettingsFolds.has(k) ? "open" : "");
@@ -1375,24 +1453,68 @@ function renderSettingsView() {
 
     <details class="fold-card" data-fold="custom" ${isFoldOpen("custom")}>
       <summary>
-        <span>自定义上游预设（${state.customProfiles.length}）</span>
-        <span class="meta">展开 ▾</span>
+        <span>直连 API 模型（${state.customProfiles.length}）</span>
+        <span class="meta">无注入 · 展开 ▾</span>
       </summary>
       <div class="fold-body">
         <div class="form-grid">
-          <input id="pf-name" placeholder="预设名称（如 DeepSeek Relay）" />
-          <select id="pf-driver">
-            <option value="dsh">引擎: DSH (OpenAI 兼容)</option>
-            <option value="claude">引擎: Claude Code</option>
-            <option value="codex">引擎: Codex CLI</option>
+          <input id="pf-name" placeholder="显示名称（如 DeepSeek 直连）" value="${escapeHtml(
+            editing?.name || "",
+          )}" />
+          <select id="pf-api">
+            <option value="openai-completions" ${
+              editApi === "openai-completions" ? "selected" : ""
+            }>协议: OpenAI Chat Completions</option>
+            <option value="openai-responses" ${
+              editApi === "openai-responses" ? "selected" : ""
+            }>协议: OpenAI Responses</option>
+            <option value="anthropic-messages" ${
+              editApi === "anthropic-messages" ? "selected" : ""
+            }>协议: Anthropic Messages</option>
           </select>
-          <input id="pf-model" placeholder="模型 ID（必填）" />
-          <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" />
-          <input id="pf-baseurl" placeholder="Base URL（留空继承默认）" />
-          <input id="pf-keyenv" placeholder="API Key 环境变量名（非明文）" />
+          <input id="pf-model" placeholder="模型 ID（必填，如 deepseek-chat）" value="${escapeHtml(
+            editing?.model || "",
+          )}" />
+          <select id="pf-effort">
+            <option value="high" ${editEffort === "high" ? "selected" : ""}>默认思考: 高</option>
+            <option value="medium" ${editEffort === "medium" ? "selected" : ""}>默认思考: 中</option>
+            <option value="low" ${editEffort === "low" ? "selected" : ""}>默认思考: 低</option>
+            <option value="off" ${editEffort === "off" ? "selected" : ""}>默认思考: 关</option>
+          </select>
+          <input id="pf-baseurl" class="form-full" placeholder="Base URL（必填，如 https://api.example.com/v1）" value="${escapeHtml(
+            editing?.baseURL || "",
+          )}" />
+          <input id="pf-keyenv" class="form-full" placeholder="API Key 环境变量名（如 MY_API_KEY，绝不存明文）" value="${escapeHtml(
+            editing?.apiKeyEnv || "",
+          )}" />
+          <input id="pf-cw" type="number" placeholder="上下文窗口（默认 200000）" value="${
+            editing?.contextWindow || ""
+          }" />
+          <input id="pf-maxtok" type="number" placeholder="最大输出（默认 64000）" value="${
+            editing?.maxTokens || ""
+          }" />
+          <div class="form-checks form-full">
+            <span>输入类型</span>
+            <div class="form-checks-group">
+              <label class="chk-label"><input id="pf-inp-text" type="checkbox" checked disabled />文本</label>
+              <label class="chk-label"><input id="pf-inp-image" type="checkbox" ${
+                editImageChecked ? "checked" : ""
+              } />图片 / 识图</label>
+            </div>
+          </div>
         </div>
-        <div style="display:flex;justify-content:flex-end;">
-          <button id="btn-save-profile" type="button" class="btn btn-primary">保存预设</button>
+        <div class="form-actions">
+          <span class="muted" style="font-size:10.5px;">独立直连引擎，零第三方提示注入</span>
+          <div class="row-actions">
+            ${
+              editing
+                ? `<button id="btn-cancel-edit-profile" type="button" class="btn">取消</button>`
+                : ""
+            }
+            <button id="btn-save-profile" type="button" class="btn btn-primary">${
+              editing ? "更新直连模型" : "保存直连模型"
+            }</button>
+          </div>
         </div>
         ${customListHtml}
       </div>
@@ -1472,7 +1594,7 @@ function renderOverlayView(force = false) {
     titleEl.innerHTML = `
       <span class="ov-icon">${OV_ICONS.settings}</span>
       <span>模型与设置</span>
-      <span class="ov-sub">v3.2.2</span>`;
+      <span class="ov-sub">v3.3.0</span>`;
     bodyEl.innerHTML = renderSettingsView();
     const newList = $("settings-model-list");
     if (newList) newList.scrollTop = prevListScroll;
@@ -1497,6 +1619,25 @@ function buildCardHtml(item, key, isLastReasoning) {
         </div>
         <div class="card-body pre-wrap">${escapeHtml(item.text)}</div>
       </div>`;
+  }
+
+  if (item.kind === "system") {
+    const isOpen = state.openDetails.has(key);
+    const label = item.label || "DSH 系统注入";
+    return `
+      <details class="card card-system" data-card-key="${escapeHtml(key)}" data-key="${escapeHtml(
+        key,
+      )}" ${isOpen ? "open" : ""}>
+        <summary class="card-head clickable">
+          <span class="tag tag-sys">DSH 系统注入</span>
+          <span class="summary-preview">${escapeHtml(label)}<span class="sys-hint">（非主代理指令）</span></span>
+          <span class="card-actions">
+            <span class="meta">T${item.turn || 1} · ${item.charCount || item.text.length}字</span>
+            <button type="button" class="icon-btn" data-copy-key="${escapeHtml(key)}">复制</button>
+          </span>
+        </summary>
+        <div class="card-body pre-wrap">${escapeHtml(item.text)}</div>
+      </details>`;
   }
 
   if (item.kind === "reasoning") {
@@ -1665,6 +1806,16 @@ function buildLiveFooterHtml(run) {
           <span class="meta">耗时 ${run.elapsedSec}s</span>
         </div>
         <div class="card-body muted">${escapeHtml(reasonText)}。可在下方继续输入指令续聊该会话。</div>
+      </div>`;
+  }
+  if (state.session?.interrupted && !run?.status) {
+    return `
+      <div class="card card-interrupted" id="live-stream-card">
+        <div class="card-head">
+          <span class="tag tag-run">上次运行意外中断</span>
+          <span class="meta">未正常收尾</span>
+        </div>
+        <div class="card-body muted">该会话在步骤执行中途失去连接（例如插件刷新重启或子进程被外部终止），可直接在下方发送消息继续执行。</div>
       </div>`;
   }
   return "";
@@ -1962,6 +2113,10 @@ function renderInlineCard() {
       statusWrap.className = "ic-status done";
       dot.className = "dot done";
       statusText.textContent = `完成 · ${run.elapsedSec}s`;
+    } else if (s?.interrupted) {
+      statusWrap.className = "ic-status stalled";
+      dot.className = "dot stalled";
+      statusText.textContent = "上次中断";
     } else if (s) {
       statusWrap.className = "ic-status";
       dot.className = "dot idle";
@@ -2177,8 +2332,8 @@ function scheduleNextPoll() {
 function openView(viewName) {
   state.activeView = viewName;
   if (viewName === "settings") {
-    if (state.selection.profileId) {
-      state.settingsEngineTab = "custom";
+    if (state.selection.profileId || state.selection.driver === "direct") {
+      state.settingsEngineTab = "direct";
     } else if (["dsh", "agy", "claude", "codex"].includes(state.selection.driver)) {
       state.settingsEngineTab = state.selection.driver;
     }
@@ -2333,12 +2488,13 @@ function bindEvents() {
     if (pinProfBtn) {
       e.stopPropagation();
       const pid = pinProfBtn.getAttribute("data-pin-profile");
+      const eff = pinProfBtn.getAttribute("data-pin-effort") || "";
       const p = state.customProfiles.find((x) => x.id === pid);
       if (p) {
         await pinDefaultModel({
-          driver: p.driver,
+          driver: p.driver || "direct",
           model: p.model,
-          effort: p.effort || "high",
+          effort: eff || p.effort || "high",
           profileId: p.id,
         });
       }
@@ -2370,12 +2526,26 @@ function bindEvents() {
     const pickProfBtn = e.target.closest("[data-pick-profile]");
     if (pickProfBtn) {
       const pid = pickProfBtn.getAttribute("data-pick-profile");
+      const eff = pickProfBtn.getAttribute("data-pick-effort") || "";
+      const rowKey = pickProfBtn.getAttribute("data-toggle-row");
+      const applyToast = pickProfBtn.getAttribute("data-apply-toast") === "1";
       const p = state.customProfiles.find((x) => x.id === pid);
       if (p) {
-        state.selection = { driver: p.driver, model: p.model, effort: p.effort || "high", profileId: p.id };
+        const nextEffort = eff || p.effort || "high";
+        state.selection = {
+          driver: p.driver || "direct",
+          model: p.model,
+          effort: nextEffort,
+          profileId: p.id,
+        };
         state.userTouchedModel = true;
+        if (rowKey) {
+          state.expandedModelRow = state.expandedModelRow === rowKey ? "" : rowKey;
+        }
         renderModelCapsule();
-        showToast(`已切换: ${p.name}`);
+        if (applyToast || !rowKey) {
+          showToast(`已切换: ${p.name || p.model} · ${effortLabel(nextEffort)}`);
+        }
         refreshSettingsModelSection();
       }
       return;
@@ -2429,52 +2599,95 @@ function bindEvents() {
       return;
     }
 
+    const editBtn = e.target.closest("[data-edit-profile]");
+    if (editBtn) {
+      state.editingProfileId = editBtn.getAttribute("data-edit-profile") || "";
+      state.openSettingsFolds.add("custom");
+      renderOverlayView(true);
+      return;
+    }
+
+    if (e.target.closest("#btn-cancel-edit-profile")) {
+      state.editingProfileId = "";
+      renderOverlayView(true);
+      return;
+    }
+
     if (e.target.closest("#btn-save-profile")) {
       const name = $("pf-name")?.value.trim() || "";
-      const driver = $("pf-driver")?.value || "dsh";
+      const api = $("pf-api")?.value || "openai-completions";
       const model = $("pf-model")?.value.trim() || "";
+      const effort = $("pf-effort")?.value || "high";
       const baseURL = $("pf-baseurl")?.value.trim() || "";
       const apiKeyEnv = $("pf-keyenv")?.value.trim() || "";
       const cw = Number($("pf-cw")?.value) || 200000;
+      const maxTokens = Number($("pf-maxtok")?.value) || 64000;
+      const inputs = $("pf-inp-image")?.checked ? ["text", "image"] : ["text"];
       if (!model) {
         showToast("请填写模型 ID");
         return;
       }
+      if (!baseURL) {
+        showToast("请填写 Base URL");
+        return;
+      }
+      const wasEditing = Boolean(state.editingProfileId);
       const res = await app.callServerTool({
         name: "alilas_ui_manage_profiles",
         arguments: {
           action: "upsert_profile",
           profile: {
+            id: state.editingProfileId || undefined,
             name: name || model,
-            driver,
-            provider: (name || "custom").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "custom",
+            driver: "direct",
+            api,
+            provider: (name || "direct").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "direct",
             model,
             baseURL,
             apiKeyEnv,
             contextWindow: cw,
+            maxTokens,
+            inputs,
+            effort,
           },
         },
       });
       if (res?.structuredContent?.customProfiles) {
         state.customProfiles = res.structuredContent.customProfiles;
       }
+      if (res?.structuredContent?.drivers) {
+        state.drivers = res.structuredContent.drivers;
+      }
+      state.editingProfileId = "";
+      state.settingsEngineTab = "direct";
       state.lastEtag = "";
-      showToast("已保存上游预设");
+      showToast(wasEditing ? "已更新直连模型" : "已保存直连模型");
+      renderModelCapsule();
       renderOverlayView(true);
       return;
     }
 
     const delBtn = e.target.closest("[data-del-profile]");
     if (delBtn) {
+      const pid = delBtn.getAttribute("data-del-profile");
       const res = await app.callServerTool({
         name: "alilas_ui_manage_profiles",
-        arguments: { action: "delete_profile", profile_id: delBtn.getAttribute("data-del-profile") },
+        arguments: { action: "delete_profile", profile_id: pid },
       });
       if (res?.structuredContent?.customProfiles) {
         state.customProfiles = res.structuredContent.customProfiles;
       }
+      if (res?.structuredContent?.drivers) {
+        state.drivers = res.structuredContent.drivers;
+      }
+      if (state.editingProfileId === pid) state.editingProfileId = "";
+      if (state.selection.profileId === pid) {
+        state.selection = { driver: "", model: "", effort: "high", profileId: "" };
+        state.userTouchedModel = false;
+      }
       state.lastEtag = "";
-      showToast("已删除预设");
+      showToast("已删除直连模型");
+      renderModelCapsule();
       renderOverlayView(true);
     }
   });
